@@ -261,6 +261,10 @@ def fetch_usage_for_account(
         if org_uuid:
             try:
                 return request_enterprise_usage_data(token, org_uuid)
+            except urllib.error.HTTPError as e:
+                if e.code == 401:
+                    raise
+                _logger.debug("Enterprise usage endpoint HTTP %d, falling back to standard", e.code)
             except Exception:
                 _logger.debug("Enterprise usage endpoint failed, falling back to standard")
         return request_usage_data(token)
