@@ -1004,3 +1004,148 @@ class TestSlimVsFullConfig:
                 assert live.get("userID") != "host-machine-identity"
                 assert live.get("anonymousId") != "anon-host-id"
                 assert "appleTerminalBackupPath" not in live
+
+
+# ---------------------------------------------------------------------------
+# Issue #41: tolerate broken slots in export
+# ---------------------------------------------------------------------------
+
+
+class TestExportSkipsBrokenSlots:
+    """Issue #41: --export (all accounts) should warn-and-skip slots whose
+    backup credentials or config are missing, instead of aborting. --export
+    with an explicit --account must keep failing for that one slot."""
+
+    def _break_credentials(self, switcher: ClaudeAccountSwitcher, num: int, email: str) -> None:
+        cred_file = (
+            switcher.credentials_dir / f".creds-{num}-{email}.enc"
+        )
+        if cred_file.exists():
+            cred_file.unlink()
+
+    def _break_config(self, switcher: ClaudeAccountSwitcher, num: int, email: str) -> None:
+        cfg_file = (
+            switcher.configs_dir / f".claude-config-{num}-{email}.json"
+        )
+        if cfg_file.exists():
+            cfg_file.unlink()
+
+    def test_all_accounts_skips_missing_credentials_with_stderr_warning(
+        self, temp_home: Path, capsys
+    ):
+        s = _linux_switcher(temp_home)
+        _seed_account(s, 1, "alice@example.com")
+        _seed_account(s, 2, "bob@example.com")
+        self._break_credentials(s, 1, "alice@example.com")
+
+        out = temp_home / "backup.cswap"
+        export_accounts(s, str(out))
+
+        envelope = json.loads(out.read_text())
+        emails = [a["email"] for a in envelope["accounts"]]
+        assert emails == ["bob@example.com"]
+
+        captured = capsys.readouterr()
+        # Warning must be on stderr, not stdout, so pipe mode stays JSON-clean.
+        assert "Skipping Account-1" in captured.err
+        assert "alice@example.com" in captured.err
+        assert "Skipping Account-1" not in captured.out
+
+    def test_all_accounts_skips_missing_config_with_stderr_warning(
+        self, temp_home: Path, capsys
+    ):
+        s = _linux_switcher(temp_home)
+        _seed_account(s, 1, "alice@example.com")
+        _seed_account(s, 2, "bob@example.com")
+        self._break_config(s, 1, "alice@example.com")
+
+        out = temp_home / "backup.cswap"
+        export_accounts(s, str(out))
+
+        envelope = json.loads(out.read_text())
+        assert [a["email"] for a in envelope["accounts"]] == ["bob@example.com"]
+        assert "Skipping Account-1" in capsys.readouterr().err
+
+    def test_explicit_account_with_missing_credentials_hard_fails(
+        self, temp_home: Path
+    ):
+        s = _linux_switcher(temp_home)
+        _seed_account(s, 1, "alice@example.com")
+        _seed_account(s, 2, "bob@example.com")
+        self._break_credentials(s, 1, "alice@example.com")
+
+        from claude_swap.exceptions import CredentialReadError
+
+        with pytest.raises(CredentialReadError, match="no backup credentials"):
+            export_accounts(
+                s, str(temp_home / "x.cswap"), account="1"
+            )
+
+    def test_explicit_account_with_missing_config_hard_fails(
+        self, temp_home: Path
+    ):
+        s = _linux_switcher(temp_home)
+        _seed_account(s, 1, "alice@example.com")
+        _seed_account(s, 2, "bob@example.com")
+        self._break_config(s, 1, "alice@example.com")
+
+        from claude_swap.exceptions import ConfigError
+
+        with pytest.raises(ConfigError, match="no backup config"):
+            export_accounts(
+                s, str(temp_home / "x.cswap"), account="1"
+            )
+
+    def test_all_slots_broken_raises_transfer_error(self, temp_home: Path):
+        s = _linux_switcher(temp_home)
+        _seed_account(s, 1, "alice@example.com")
+        _seed_account(s, 2, "bob@example.com")
+        self._break_credentials(s, 1, "alice@example.com")
+        self._break_credentials(s, 2, "bob@example.com")
+
+        with pytest.raises(TransferError, match="no exportable accounts"):
+            export_accounts(s, str(temp_home / "x.cswap"))
+
+    def test_skipped_active_slot_clears_envelope_active(
+        self, temp_home: Path, capsys
+    ):
+        """If the recorded activeAccountNumber's backup is missing and there's
+        no live session to source it from, the slot is skipped — the envelope
+        must not advertise that number as active or import would dangle."""
+        s = _linux_switcher(temp_home)
+        _seed_account(s, 1, "alice@example.com")
+        _seed_account(s, 2, "bob@example.com")
+
+        # Force active = 1, then break slot 1's credentials.
+        data = s._get_sequence_data()
+        data["activeAccountNumber"] = 1
+        s._write_json(s.sequence_file, data)
+        self._break_credentials(s, 1, "alice@example.com")
+
+        # No live session — _get_current_account() returns None, so the
+        # broken slot 1 is not rescued via live read.
+        out = temp_home / "backup.cswap"
+        export_accounts(s, str(out))
+
+        envelope = json.loads(out.read_text())
+        assert [a["email"] for a in envelope["accounts"]] == ["bob@example.com"]
+        assert envelope["activeAccountNumber"] is None
+
+    def test_stdout_pipe_mode_keeps_stdout_pure_json(
+        self, temp_home: Path, capsys
+    ):
+        """cswap --export - must produce valid JSON on stdout even when one
+        slot is broken — warning must go to stderr."""
+        s = _linux_switcher(temp_home)
+        _seed_account(s, 1, "alice@example.com")
+        _seed_account(s, 2, "bob@example.com")
+        self._break_credentials(s, 1, "alice@example.com")
+
+        export_accounts(s, "-")
+        captured = capsys.readouterr()
+
+        # stdout must parse as JSON cleanly.
+        envelope = json.loads(captured.out)
+        assert [a["email"] for a in envelope["accounts"]] == ["bob@example.com"]
+        # Warning is on stderr.
+        assert "Skipping Account-1" in captured.err

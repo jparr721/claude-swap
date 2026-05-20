@@ -2149,3 +2149,227 @@ class TestPurge:
             call("claude-code", "account-1-user@example.com"),
             call("claude-code", "account-None-user@example.com"),
         ])
+
+
+# ---------------------------------------------------------------------------
+# Issue #41: tolerate broken slots in switch/switch_to
+# ---------------------------------------------------------------------------
+
+
+class TestSwitchSkipsBrokenSlots:
+    """Issue #41: --switch must skip slots whose stored creds or config are
+    missing rather than aborting. --switch-to N must keep failing but with an
+    actionable, accurate message."""
+
+    def _setup(self, temp_home: Path) -> ClaudeAccountSwitcher:
+        s = ClaudeAccountSwitcher()
+        s.platform = Platform.LINUX
+        s._setup_directories()
+        s._init_sequence_file()
+        return s
+
+    def _seed(
+        self,
+        s: ClaudeAccountSwitcher,
+        num: int,
+        email: str,
+        creds: bool = True,
+        config: bool = True,
+    ) -> None:
+        if creds:
+            s._write_account_credentials(
+                str(num),
+                email,
+                json.dumps({
+                    "claudeAiOauth": {
+                        "accessToken": f"sk-{num}",
+                        "refreshToken": f"rt-{num}",
+                    },
+                }),
+            )
+        if config:
+            s._write_account_config(
+                str(num),
+                email,
+                json.dumps({
+                    "oauthAccount": {
+                        "emailAddress": email,
+                        "accountUuid": f"uuid-{num}",
+                    },
+                }),
+            )
+
+        data = s._get_sequence_data() or {
+            "activeAccountNumber": None,
+            "lastUpdated": "",
+            "sequence": [],
+            "accounts": {},
+        }
+        data["accounts"][str(num)] = {
+            "email": email,
+            "uuid": f"uuid-{num}",
+            "organizationUuid": "",
+            "organizationName": "",
+            "added": "2024-01-01T00:00:00Z",
+        }
+        if num not in data["sequence"]:
+            data["sequence"].append(num)
+            data["sequence"].sort()
+        if data["activeAccountNumber"] is None:
+            data["activeAccountNumber"] = num
+        s._write_json(s.sequence_file, data)
+
+    def test_account_is_switchable_helper(self, temp_home: Path):
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com", creds=False)
+        self._seed(s, 3, "c@example.com", config=False)
+
+        assert s._account_is_switchable("1") is True
+        assert s._account_is_switchable("2") is False
+        assert s._account_is_switchable("3") is False
+        # Stale sequence reference to a missing account record.
+        assert s._account_is_switchable("99") is False
+
+    def test_rotation_skips_broken_next_slot(self, temp_home: Path, capsys):
+        """Three accounts, active=1, slot 2 broken — rotation must land on 3."""
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com", creds=False)
+        self._seed(s, 3, "c@example.com")
+
+        # Active account 1 is the live identity.
+        live_creds = json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-live-1",
+                "refreshToken": "rt-live-1",
+            },
+        })
+        (temp_home / ".claude" / ".credentials.json").write_text(live_creds)
+        (temp_home / ".claude.json").write_text(json.dumps({
+            "oauthAccount": {
+                "emailAddress": "a@example.com",
+                "accountUuid": "uuid-1",
+            },
+        }))
+
+        with patch.object(s, "list_accounts"):
+            s.switch()
+
+        out = capsys.readouterr().out
+        assert "Skipping Account-2" in out
+
+        data = s._get_sequence_data()
+        assert data["activeAccountNumber"] == 3
+
+    def test_rotation_no_valid_targets_returns_without_error(
+        self, temp_home: Path, capsys
+    ):
+        """All non-active slots are broken — print a message, no exception."""
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com", creds=False)
+
+        live_creds = json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-live-1",
+                "refreshToken": "rt-live-1",
+            },
+        })
+        (temp_home / ".claude" / ".credentials.json").write_text(live_creds)
+        (temp_home / ".claude.json").write_text(json.dumps({
+            "oauthAccount": {
+                "emailAddress": "a@example.com",
+                "accountUuid": "uuid-1",
+            },
+        }))
+
+        s.switch()  # must not raise
+
+        out = capsys.readouterr().out
+        assert "Skipping Account-2" in out
+        assert "No other accounts have valid" in out
+
+        # Active account unchanged.
+        data = s._get_sequence_data()
+        assert data["activeAccountNumber"] == 1
+
+    def test_switch_to_missing_credentials_actionable_error(self, temp_home: Path):
+        """switch_to a broken target raises with the new credentials message."""
+        from claude_swap.exceptions import SwitchError
+
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com", creds=False)
+
+        live_creds = json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-live-1",
+                "refreshToken": "rt-live-1",
+            },
+        })
+        (temp_home / ".claude" / ".credentials.json").write_text(live_creds)
+        (temp_home / ".claude.json").write_text(json.dumps({
+            "oauthAccount": {
+                "emailAddress": "a@example.com",
+                "accountUuid": "uuid-1",
+            },
+        }))
+
+        with pytest.raises(SwitchError, match="has no stored credentials"):
+            s.switch_to("2")
+
+    def test_switch_to_missing_config_actionable_error(self, temp_home: Path):
+        """switch_to a target with creds but no config raises a distinct error."""
+        from claude_swap.exceptions import SwitchError
+
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com", config=False)
+
+        live_creds = json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-live-1",
+                "refreshToken": "rt-live-1",
+            },
+        })
+        (temp_home / ".claude" / ".credentials.json").write_text(live_creds)
+        (temp_home / ".claude.json").write_text(json.dumps({
+            "oauthAccount": {
+                "emailAddress": "a@example.com",
+                "accountUuid": "uuid-1",
+            },
+        }))
+
+        with pytest.raises(SwitchError, match="has no stored config backup"):
+            s.switch_to("2")
+
+    def test_fresh_machine_skips_broken_preferred_target(self, temp_home: Path, capsys):
+        """No live session — picks first switchable slot if the recorded
+        activeAccountNumber is broken (e.g., right after import)."""
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com", creds=False)
+        self._seed(s, 2, "b@example.com")
+        # Mark account 1 as the recorded active (broken) — simulates a stale
+        # state after import + later corruption.
+        data = s._get_sequence_data()
+        data["activeAccountNumber"] = 1
+        s._write_json(s.sequence_file, data)
+
+        # No live config — fresh-machine branch.
+        with patch.object(s, "list_accounts"):
+            s.switch()
+
+        out = capsys.readouterr().out
+        assert "Skipping Account-1" in out
+
+        data = s._get_sequence_data()
+        assert data["activeAccountNumber"] == 2
+
+    def test_fresh_machine_all_broken_raises(self, temp_home: Path):
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com", creds=False)
+        self._seed(s, 2, "b@example.com", config=False)
+
+        with pytest.raises(ConfigError, match="No managed accounts have valid"):
+            s.switch()

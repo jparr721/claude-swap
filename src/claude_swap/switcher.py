@@ -370,6 +370,24 @@ class ClaudeAccountSwitcher:
             return config_file.read_text(encoding="utf-8")
         return ""
 
+    def _account_is_switchable(self, account_num: str) -> bool:
+        """Whether a slot has both stored credentials and config backups.
+
+        Used by switch() and switch_to() to decide whether a target slot can
+        be activated without re-adding the account. Tolerates stale sequence
+        entries that reference a removed account record.
+        """
+        data = self._get_sequence_data() or {}
+        record = data.get("accounts", {}).get(str(account_num))
+        if not record:
+            return False
+        email = record.get("email", "")
+        if not self._read_account_credentials(str(account_num), email):
+            return False
+        if not self._read_account_config(str(account_num), email):
+            return False
+        return True
+
     def _write_account_config(
         self, account_num: str, email: str, config: str
     ) -> None:
@@ -1184,15 +1202,36 @@ class ClaudeAccountSwitcher:
         # Fresh-machine path: no live Claude session, but we have managed accounts
         # (e.g. right after cswap --import). Activate the recorded
         # activeAccountNumber, or fall back to the first slot in sequence.
+        # With no live state to capture, the target must have valid backups —
+        # walk the sequence if the preferred target is broken.
         if identity is None:
-            data = self._get_sequence_data()
-            target = data.get("activeAccountNumber") if data else None
-            if not target:
-                sequence = (data or {}).get("sequence", [])
-                target = sequence[0] if sequence else None
-            if not target:
+            data = self._get_sequence_data() or {}
+            sequence = data.get("sequence", [])
+            preferred = data.get("activeAccountNumber")
+            if not preferred and sequence:
+                preferred = sequence[0]
+            if not preferred:
                 raise ConfigError("No accounts are managed yet")
-            self._perform_switch(str(target))
+
+            target = str(preferred)
+            if not self._account_is_switchable(target):
+                print(
+                    f"{accent('Skipping')} Account-{target} "
+                    f"(no stored credentials/config, re-add with "
+                    f"cswap --add-account --slot {target})"
+                )
+                fallback = next(
+                    (str(num) for num in sequence
+                     if str(num) != target and self._account_is_switchable(str(num))),
+                    None,
+                )
+                if not fallback:
+                    raise ConfigError(
+                        "No managed accounts have valid stored credentials/config. "
+                        "Re-add a slot with: cswap --add-account --slot <number>"
+                    )
+                target = fallback
+            self._perform_switch(target)
             return
 
         current_email, current_org_uuid = identity
@@ -1216,14 +1255,33 @@ class ClaudeAccountSwitcher:
 
         active_account = data.get("activeAccountNumber")
 
-        # Find current index and get next
+        # Find current index and get next, skipping broken candidates.
+        # The active slot is never checked here — _perform_switch captures
+        # live state into a fresh backup before swapping, so the active
+        # slot's stored backup may be stale or absent without blocking us.
         try:
             current_index = sequence.index(active_account)
         except ValueError:
             current_index = 0
 
-        next_index = (current_index + 1) % len(sequence)
-        next_account = str(sequence[next_index])
+        next_account: str | None = None
+        for offset in range(1, len(sequence)):
+            candidate = str(sequence[(current_index + offset) % len(sequence)])
+            if self._account_is_switchable(candidate):
+                next_account = candidate
+                break
+            print(
+                f"{accent('Skipping')} Account-{candidate} "
+                f"(no stored credentials/config, re-add with "
+                f"cswap --add-account --slot {candidate})"
+            )
+
+        if next_account is None:
+            print(dimmed(
+                "No other accounts have valid stored credentials/config.\n"
+                "Re-add a skipped slot with: cswap --add-account --slot <number>"
+            ))
+            return
 
         self._perform_switch(next_account)
 
@@ -1309,9 +1367,15 @@ class ClaudeAccountSwitcher:
                     target_account, target_email
                 )
                 target_config = self._read_account_config(target_account, target_email)
-                if not target_creds or not target_config:
+                if not target_creds:
                     raise SwitchError(
-                        f"Missing backup data for Account-{target_account}"
+                        f"Account-{target_account} has no stored credentials. "
+                        f"Re-add with: cswap --add-account --slot {target_account}"
+                    )
+                if not target_config:
+                    raise SwitchError(
+                        f"Account-{target_account} has no stored config backup. "
+                        f"Re-add with: cswap --add-account --slot {target_account}"
                     )
                 try:
                     target_config_data = json.loads(target_config)
@@ -1435,9 +1499,15 @@ class ClaudeAccountSwitcher:
                 )
                 target_config = self._read_account_config(target_account, target_email)
 
-                if not target_creds or not target_config:
+                if not target_creds:
                     raise SwitchError(
-                        f"Missing backup data for Account-{target_account}"
+                        f"Account-{target_account} has no stored credentials. "
+                        f"Re-add with: cswap --add-account --slot {target_account}"
+                    )
+                if not target_config:
+                    raise SwitchError(
+                        f"Account-{target_account} has no stored config backup. "
+                        f"Re-add with: cswap --add-account --slot {target_account}"
                     )
 
                 # Step 3: Activate target account - credentials

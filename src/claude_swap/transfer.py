@@ -151,8 +151,12 @@ def export_accounts(
 
     accounts_map = sequence_data["accounts"]
 
-    # Resolve which account numbers to export
-    if account is not None:
+    # Resolve which account numbers to export. When the user named a specific
+    # account, missing backup data is a hard failure (they asked for that one);
+    # in the all-accounts case we skip broken slots with a warning so one
+    # damaged slot doesn't poison the whole backup.
+    explicit_account = account is not None
+    if explicit_account:
         resolved = switcher._resolve_account_identifier(account)
         if resolved is None or resolved not in accounts_map:
             raise TransferError(f"account not found: {account}")
@@ -188,14 +192,21 @@ def export_accounts(
         else:
             creds_text = switcher._read_account_credentials(num, email)
             config_text = switcher._read_account_config(num, email)
-            if not creds_text:
-                raise CredentialReadError(
-                    f"no backup credentials found for account {num} ({email})"
+            if not creds_text or not config_text:
+                if explicit_account:
+                    if not creds_text:
+                        raise CredentialReadError(
+                            f"no backup credentials found for account {num} ({email})"
+                        )
+                    raise ConfigError(
+                        f"no backup config found for account {num} ({email})"
+                    )
+                _eprint(
+                    f"Skipping Account-{num} ({email}): no stored "
+                    f"credentials/config — re-add with: "
+                    f"cswap --add-account --slot {num}"
                 )
-            if not config_text:
-                raise ConfigError(
-                    f"no backup config found for account {num} ({email})"
-                )
+                continue
 
         config_obj = _parse_payload(config_text, f"config for {email}")
         if not full:
@@ -214,13 +225,28 @@ def export_accounts(
             }
         )
 
+    if not accounts_payload:
+        raise TransferError(
+            "no exportable accounts — all managed slots are missing stored "
+            "credentials/config. Re-add with: cswap --add-account --slot <number>"
+        )
+
+    # Only carry activeAccountNumber if that slot is actually present in the
+    # payload — otherwise import would reference an account that isn't there
+    # (e.g., the recorded active slot was skipped due to missing backup).
+    recorded_active = sequence_data.get("activeAccountNumber")
+    exported_nums = {a["number"] for a in accounts_payload}
+    active_in_payload = (
+        recorded_active if recorded_active in exported_nums else None
+    )
+
     envelope = {
         "version": FORMAT_VERSION,
         "exportedAt": get_timestamp(),
         "exportedFrom": _PLATFORM_TAG.get(switcher.platform, "unknown"),
         "swapVersion": __version__,
         "encrypted": False,
-        "activeAccountNumber": sequence_data.get("activeAccountNumber"),
+        "activeAccountNumber": active_in_payload,
         "accounts": accounts_payload,
     }
 
