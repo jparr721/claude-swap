@@ -66,10 +66,20 @@ def check_for_update(current_version: str) -> str | None:
             write_cache(CACHE_PATH, latest_version)
 
         if latest_version and _parse_version(latest_version) > _parse_version(current_version):
-            hint = {
-                "uv": "Run `uv tool upgrade claude-swap` to update.",
-                "pipx": "Run `pipx upgrade claude-swap` to update.",
-            }.get(_detect_install_method() or "", "Consider upgrading!")
+            method = _detect_install_method()
+            direct = {
+                "uv": "uv tool upgrade claude-swap",
+                "pipx": "pipx upgrade claude-swap",
+            }.get(method or "")
+            if direct and sys.platform != "win32":
+                # cswap --upgrade actually performs the upgrade here.
+                hint = "Run `cswap --upgrade` to update."
+            elif direct:
+                # Windows: cswap --upgrade only prints, so point at the real command.
+                hint = f"Run `{direct}` to update."
+            else:
+                # Unknown install method: cswap --upgrade shows manual instructions.
+                hint = "Run `cswap --upgrade` for upgrade instructions."
             return (
                 f"A newer version of claude-swap is available ({latest_version}). "
                 f"You are using {current_version}. {hint}"
@@ -105,6 +115,19 @@ def run_self_upgrade() -> int:
             "If you installed with `pip install -e .`, use `git pull` instead."
         )
         return 1
+
+    # Windows: the running cswap.exe launcher is locked, so an in-process
+    # uv/pipx upgrade fails when it tries to replace the executable even
+    # though the package itself updates. Tell the user to run it in a fresh
+    # shell instead of executing it ourselves.
+    if sys.platform == "win32":
+        error(
+            "claude-swap can't upgrade itself while running on Windows.\n"
+            "Close this process, then run in a new terminal:\n"
+            f"  {' '.join(cmd)}"
+        )
+        return 1
+
     try:
         result = subprocess.run(cmd, check=False)
         return result.returncode
