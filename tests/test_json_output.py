@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from claude_swap import oauth
 from claude_swap.exceptions import ConfigError, SwitchError
 from claude_swap.json_output import (
     SCHEMA_VERSION,
@@ -116,7 +117,7 @@ class TestListJson:
         with patch.object(switcher, "_read_active_credentials",
                           return_value=ActiveCredentials(active_creds, False)), \
              patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
-             patch("claude_swap.oauth.fetch_usage_for_account", return_value=usage):
+             patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(usage)):
             payload = switcher.list_accounts(json_output=True)
 
         # Method itself prints nothing — the CLI serializes.
@@ -144,7 +145,7 @@ class TestListJson:
         with patch.object(switcher, "_read_active_credentials",
                           return_value=ActiveCredentials(active_creds, False)), \
              patch.object(switcher, "_read_account_credentials", return_value=""), \
-             patch("claude_swap.oauth.fetch_usage_for_account", return_value=None):
+             patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(None)):
             payload = switcher.list_accounts(json_output=True)
 
         by_num = {a["number"]: a for a in payload["accounts"]}
@@ -184,7 +185,7 @@ class TestStatusJson:
 
         with patch.object(switcher, "_read_active_credentials",
                           return_value=ActiveCredentials(active_creds, False)), \
-             patch("claude_swap.oauth.fetch_usage_for_account", return_value=usage):
+             patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(usage)):
             payload = switcher.status(json_output=True)
 
         assert capsys.readouterr().out == ""
@@ -242,7 +243,7 @@ def _install_patches(switcher, creds_store, configs_store, live_state):
         patch.object(switcher, "_write_credentials",
                      side_effect=lambda c: live_state.__setitem__("creds", c)),
         # Don't make network calls from the (suppressed) post-switch usage path.
-        patch("claude_swap.oauth.fetch_usage_for_account", return_value=None),
+        patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(None)),
     ]
     for p in patches:
         p.start()
