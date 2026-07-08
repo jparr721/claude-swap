@@ -188,7 +188,7 @@ def test_codex_wrapper_uses_provider_store_and_compat_usage_hook(
     payload = switcher.list_accounts(json_output=True)
 
     assert calls == [(json.dumps(_codex_auth("acct-1")), CODEX_USAGE_TIMEOUT_S)]
-    assert payload["schemaVersion"] == 2
+    assert payload["schemaVersion"] == 1
     assert payload["provider"] == {"frontend": "codex", "backend": "openai"}
     assert payload["activeAccountNumber"] == 1
     assert payload["accounts"][0]["label"] == "work"

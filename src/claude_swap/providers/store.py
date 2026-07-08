@@ -14,7 +14,7 @@ from claude_swap import oauth
 from claude_swap.exceptions import AccountNotFoundError, ConfigError, ValidationError
 from claude_swap.locking import FileLock
 from claude_swap.models import get_timestamp
-from claude_swap.json_output import usage_freshness_fields
+from claude_swap.json_output import SCHEMA_VERSION, usage_freshness_fields
 from claude_swap.printer import accent, bolded, dimmed, format_age, muted
 from claude_swap.providers.openai import OPENAI_USAGE_TIMEOUT_S
 from claude_swap.providers.types import (
@@ -22,7 +22,7 @@ from claude_swap.providers.types import (
     ProviderDefinition,
     UsageFetchError,
 )
-from claude_swap.usage_store import FetchRecord, SCHEMA_VERSION, UsageEntry, UsageStore
+from claude_swap.usage_store import FetchRecord, UsageEntry, UsageStore
 
 _USAGE_AGE_NOTE_S = 90.0
 
@@ -228,6 +228,11 @@ class ProviderAccountStore:
                 f"{self.definition.display_name} state accounts must be an object: "
                 f"{self.sequence_file}"
             )
+        if not all(isinstance(key, str) and key.isdigit() for key in accounts):
+            raise ConfigError(
+                f"{self.definition.display_name} state account keys must be numeric: "
+                f"{self.sequence_file}"
+            )
         return data
 
     def _auth_backup_path(self, account_num: str) -> Path:
@@ -264,10 +269,10 @@ class ProviderAccountStore:
         try:
             return self._auth_backup_path(account_num).read_text(encoding="utf-8")
         except FileNotFoundError as exc:
-            frontend = self.definition.ref.frontend
+            ref = self.definition.ref
             raise ConfigError(
                 f"{self.definition.display_name} Account-{account_num} has no stored auth. "
-                f"Re-add it with: cswap {frontend} add --slot {account_num}"
+                f"Re-add it with: cswap {ref.frontend} {ref.backend} add --slot {account_num}"
             ) from exc
         except OSError as exc:
             raise ConfigError(

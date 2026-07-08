@@ -84,7 +84,7 @@ def test_codex_store_adds_and_lists_account(
     payload = store.list_accounts(json_output=True)
 
     assert backend_calls == [(json.dumps(auth_payload), 10.0)]
-    assert payload["schemaVersion"] == 2
+    assert payload["schemaVersion"] == 1
     assert payload["provider"] == {"frontend": "codex", "backend": "openai"}
     assert payload["activeAccountNumber"] == 1
     assert payload["accounts"][0]["label"] == "work"
@@ -148,3 +148,41 @@ def test_codex_provider_store_ignores_existing_codex_backup(temp_home: Path) -> 
     assert not store.sequence_file.exists()
     assert not (store.auth_dir / "account-1.json").exists()
     assert payload["accounts"] == []
+
+
+def test_provider_store_rejects_nonnumeric_account_keys(temp_home: Path) -> None:
+    store = _codex_store()
+    store.sequence_file.parent.mkdir(parents=True)
+    store.sequence_file.write_text(
+        json.dumps(
+            {
+                "activeAccountNumber": None,
+                "lastUpdated": "2026-07-08T00:00:00Z",
+                "sequence": [],
+                "accounts": {"work": {"label": "work"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="state account keys must be numeric"):
+        store.list_accounts(json_output=True)
+
+
+def test_missing_stored_auth_mentions_canonical_provider_command(temp_home: Path) -> None:
+    store = _opencode_store()
+    store.sequence_file.parent.mkdir(parents=True)
+    store.sequence_file.write_text(
+        json.dumps(
+            {
+                "activeAccountNumber": None,
+                "lastUpdated": "2026-07-08T00:00:00Z",
+                "sequence": [1],
+                "accounts": {"1": {"label": "work"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="cswap opencode openai add --slot 1"):
+        store.switch("1", json_output=False)
