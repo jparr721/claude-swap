@@ -116,7 +116,7 @@ def test_missing_active_auth_mentions_provider_login(temp_home: Path) -> None:
         store.add_account(label=None, slot=None)
 
 
-def test_codex_provider_store_materializes_existing_codex_store(temp_home: Path) -> None:
+def test_codex_provider_store_ignores_existing_codex_backup(temp_home: Path) -> None:
     backup_root = get_backup_root()
     legacy = backup_root / "codex"
     legacy_auth = legacy / "auth"
@@ -143,7 +143,8 @@ def test_codex_provider_store_materializes_existing_codex_store(temp_home: Path)
     (legacy_auth / "account-1.json").write_text("{}", encoding="utf-8")
 
     store = _codex_store()
+    payload = store.list_accounts(json_output=True)
 
-    assert store.sequence_file == backup_root / "providers" / "codex" / "openai" / "sequence.json"
-    assert store.sequence_file.exists()
-    assert (store.auth_dir / "account-1.json").exists()
+    assert not store.sequence_file.exists()
+    assert not (store.auth_dir / "account-1.json").exists()
+    assert payload["accounts"] == []
