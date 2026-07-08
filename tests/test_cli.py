@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -46,7 +46,7 @@ def _subprocess_env(**extra: str) -> dict[str, str]:
     # developer with any exported would otherwise point the spawned CLI back
     # at real config/auth/backup paths (and on macOS, the real Keychain). Drop them
     # unless a caller set them deliberately.
-    for var in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_DATA_HOME"):
+    for var in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "OPENCODE_DATA_HOME", "XDG_DATA_HOME"):
         if var not in extra:
             env.pop(var, None)
     return env
@@ -687,6 +687,7 @@ class TestSubcommandAliases:
         """`cswap list --json` reaches list_accounts(json_output=True)."""
         payload = {"schemaVersion": 1, "accounts": []}
         with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch("claude_swap.cli.managed_aggregate_providers", return_value=[]), \
              patch.object(sys, "argv", ["claude-swap", "list", "--json"]), \
              patch("os.geteuid", return_value=1000, create=True), \
              patch("claude_swap.update_check.check_for_update", return_value=None):
@@ -698,32 +699,49 @@ class TestSubcommandAliases:
 
     def test_list_subcommand_appends_codex_accounts(self):
         """`cswap ls` shows Codex accounts after Claude accounts when present."""
+        provider_store = MagicMock()
+        provider_store.definition.ref.frontend = "codex"
+        provider_store.definition.frontend.display_name = "Codex"
+        provider_store.list_accounts.side_effect = [
+            {"schemaVersion": 1, "provider": "codex", "accounts": [{"number": 1}]},
+            None,
+        ]
         with patch("claude_swap.cli.ClaudeAccountSwitcher") as claude_cls, \
-             patch("claude_swap.cli.CodexAccountSwitcher") as codex_cls, \
+             patch(
+                 "claude_swap.cli.managed_aggregate_providers",
+                 return_value=[provider_store],
+             ), \
              patch.object(sys, "argv", ["claude-swap", "ls"]), \
              patch("os.geteuid", return_value=1000, create=True), \
              patch("claude_swap.update_check.check_for_update", return_value=None):
-            codex_cls.return_value.has_accounts.return_value = True
             cli.main()
 
         claude_cls.return_value.list_accounts.assert_called_once_with(
             show_token_status=False,
             json_output=False,
         )
-        codex_cls.return_value.list_accounts.assert_called_once_with(json_output=False)
+        assert provider_store.list_accounts.call_args_list == [
+            call(json_output=True),
+            call(json_output=False),
+        ]
 
     def test_list_subcommand_survives_corrupt_codex_state(self, capsys):
         """A corrupt Codex state must not fail the primary `cswap list`."""
         from claude_swap.exceptions import ConfigError
 
+        provider_store = MagicMock()
+        provider_store.definition.frontend.display_name = "Codex"
+        provider_store.list_accounts.side_effect = ConfigError(
+            "Codex state file is not valid JSON"
+        )
         with patch("claude_swap.cli.ClaudeAccountSwitcher") as claude_cls, \
-             patch("claude_swap.cli.CodexAccountSwitcher") as codex_cls, \
+             patch(
+                 "claude_swap.cli.managed_aggregate_providers",
+                 return_value=[provider_store],
+             ), \
              patch.object(sys, "argv", ["claude-swap", "ls"]), \
              patch("os.geteuid", return_value=1000, create=True), \
              patch("claude_swap.update_check.check_for_update", return_value=None):
-            codex_cls.return_value.has_accounts.side_effect = ConfigError(
-                "Codex state file is not valid JSON"
-            )
             cli.main()
 
         claude_cls.return_value.list_accounts.assert_called_once()
@@ -733,66 +751,124 @@ class TestSubcommandAliases:
         """`cswap list --json` nests Codex under `codex`, keeping Claude keys intact."""
         claude_payload = {"schemaVersion": 1, "activeAccountNumber": None, "accounts": []}
         codex_payload = {"schemaVersion": 1, "provider": "codex", "accounts": []}
+        provider_store = MagicMock()
+        provider_store.definition.ref.frontend = "codex"
+        provider_store.list_accounts.return_value = {
+            **codex_payload,
+            "accounts": [{"number": 1}],
+        }
         with patch("claude_swap.cli.ClaudeAccountSwitcher") as claude_cls, \
-             patch("claude_swap.cli.CodexAccountSwitcher") as codex_cls, \
+             patch(
+                 "claude_swap.cli.managed_aggregate_providers",
+                 return_value=[provider_store],
+             ), \
              patch.object(sys, "argv", ["claude-swap", "list", "--json"]), \
              patch("os.geteuid", return_value=1000, create=True), \
              patch("claude_swap.update_check.check_for_update", return_value=None):
             claude_cls.return_value.list_accounts.return_value = claude_payload
-            codex_cls.return_value.has_accounts.return_value = True
-            codex_cls.return_value.list_accounts.return_value = codex_payload
             cli.main()
 
-        codex_cls.return_value.list_accounts.assert_called_once_with(json_output=True)
         out = json.loads(capsys.readouterr().out)
         assert out["accounts"] == []
-        assert out["codex"] == codex_payload
+        assert out["codex"] == {**codex_payload, "accounts": [{"number": 1}]}
 
     def test_list_json_omits_codex_when_no_codex_accounts(self, capsys):
         """No Codex accounts means no `codex` key at all."""
         claude_payload = {"schemaVersion": 1, "activeAccountNumber": None, "accounts": []}
+        provider_store = MagicMock()
+        provider_store.definition.ref.frontend = "codex"
+        provider_store.list_accounts.return_value = {
+            "schemaVersion": 1,
+            "provider": "codex",
+            "accounts": [],
+        }
         with patch("claude_swap.cli.ClaudeAccountSwitcher") as claude_cls, \
-             patch("claude_swap.cli.CodexAccountSwitcher") as codex_cls, \
+             patch(
+                 "claude_swap.cli.managed_aggregate_providers",
+                 return_value=[provider_store],
+             ), \
              patch.object(sys, "argv", ["claude-swap", "list", "--json"]), \
              patch("os.geteuid", return_value=1000, create=True), \
              patch("claude_swap.update_check.check_for_update", return_value=None):
             claude_cls.return_value.list_accounts.return_value = claude_payload
-            codex_cls.return_value.has_accounts.return_value = False
             cli.main()
 
-        codex_cls.return_value.list_accounts.assert_not_called()
         assert "codex" not in json.loads(capsys.readouterr().out)
 
-    def test_codex_add_dispatches(self):
-        """`cswap codex add` dispatches with label and slot."""
-        with patch("claude_swap.cli.CodexAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "codex", "add", "--label", "work"]):
+    def test_codex_requires_backend(self, capsys):
+        with patch.object(sys, "argv", ["claude-swap", "codex", "list"]):
+            with pytest.raises(SystemExit) as excinfo:
+                cli.main()
+
+        assert excinfo.value.code == 2
+        assert "codex requires a backend" in capsys.readouterr().err
+
+    def test_codex_openai_add_dispatches(self):
+        with patch("claude_swap.cli.get_provider") as get_provider, \
+             patch.object(
+                 sys,
+                 "argv",
+                 ["claude-swap", "codex", "openai", "add", "--label", "work"],
+             ):
             cli.main()
 
-        switcher_cls.return_value.add_account.assert_called_once_with(
+        get_provider.assert_called_once_with("codex", "openai")
+        get_provider.return_value.add_account.assert_called_once_with(
             label="work",
             slot=None,
         )
 
-    def test_codex_switch_dispatches(self):
-        """`cswap codex switch 2` dispatches to the Codex switcher."""
-        with patch("claude_swap.cli.CodexAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "codex", "switch", "2"]):
+    def test_codex_openai_switch_dispatches(self):
+        with patch("claude_swap.cli.get_provider") as get_provider, \
+             patch.object(
+                 sys,
+                 "argv",
+                 ["claude-swap", "codex", "openai", "switch", "--to", "2"],
+             ):
             cli.main()
 
-        switcher_cls.return_value.switch.assert_called_once_with(
+        get_provider.assert_called_once_with("codex", "openai")
+        get_provider.return_value.switch.assert_called_once_with(
             "2",
             json_output=False,
         )
 
-    def test_codex_list_json_serialized_to_stdout(self, capsys):
-        payload = {"schemaVersion": 1, "provider": "codex", "accounts": []}
-        with patch("claude_swap.cli.CodexAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "codex", "list", "--json"]):
-            switcher_cls.return_value.list_accounts.return_value = payload
+    def test_opencode_requires_backend(self, capsys):
+        with patch.object(sys, "argv", ["claude-swap", "opencode", "list"]):
+            with pytest.raises(SystemExit) as excinfo:
+                cli.main()
+
+        assert excinfo.value.code == 2
+        assert "opencode requires a backend" in capsys.readouterr().err
+
+    def test_opencode_openai_switch_to_flag_dispatches(self):
+        with patch("claude_swap.cli.get_provider") as get_provider, \
+             patch.object(
+                 sys,
+                 "argv",
+                 ["claude-swap", "opencode", "openai", "--switch-to", "2"],
+             ):
             cli.main()
 
-        switcher_cls.return_value.list_accounts.assert_called_once_with(json_output=True)
+        get_provider.assert_called_once_with("opencode", "openai")
+        get_provider.return_value.switch.assert_called_once_with(
+            "2",
+            json_output=False,
+        )
+
+    def test_codex_openai_list_json_serialized_to_stdout(self, capsys):
+        payload = {"schemaVersion": 1, "provider": "codex", "accounts": []}
+        with patch("claude_swap.cli.get_provider") as get_provider, \
+             patch.object(
+                 sys,
+                 "argv",
+                 ["claude-swap", "codex", "openai", "list", "--json"],
+             ):
+            get_provider.return_value.list_accounts.return_value = payload
+            cli.main()
+
+        get_provider.assert_called_once_with("codex", "openai")
+        get_provider.return_value.list_accounts.assert_called_once_with(json_output=True)
         assert json.loads(capsys.readouterr().out) == payload
 
     def test_run_subcommand_still_dispatches(self):

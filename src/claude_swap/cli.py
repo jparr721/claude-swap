@@ -8,10 +8,10 @@ import os
 import sys
 
 from claude_swap import __version__
-from claude_swap.codex import CodexAccountSwitcher
-from claude_swap.exceptions import ClaudeSwitchError
+from claude_swap.exceptions import ClaudeSwitchError, ConfigError
 from claude_swap.json_output import error_envelope
 from claude_swap.printer import dimmed, error, force_utf8_output, muted
+from claude_swap.providers.registry import get_provider, managed_aggregate_providers
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
@@ -87,46 +87,82 @@ def _translate_subcommand(argv: list[str]) -> list[str]:
     return argv
 
 
-def _codex_command(argv: list[str]) -> None:
-    """Handle `cswap codex ...` commands for independent Codex auth switching."""
+def _translate_provider_subcommand(argv: list[str]) -> list[str]:
+    if not argv:
+        return argv
+    verb, rest = argv[0], argv[1:]
+    if verb == "switch":
+        if rest and not rest[0].startswith("-"):
+            return ["--switch-to", *rest]
+        return ["--switch", *rest]
+    flags = {
+        "add": "--add-account",
+        "list": "--list",
+        "ls": "--list",
+        "status": "--status",
+        "remove": "--remove-account",
+        "rm": "--remove-account",
+    }
+    flag = flags.get(verb)
+    if flag is not None:
+        return [flag, *rest]
+    return argv
+
+
+def _provider_command(frontend: str, backend: str, argv: list[str]) -> None:
+    """Handle provider auth switching commands."""
     parser = argparse.ArgumentParser(
-        prog=f"{_prog_name()} codex",
-        description="Manage Codex CLI auth snapshots independently of Claude accounts.",
+        prog=f"{_prog_name()} {frontend} {backend}",
+        description=f"Manage {frontend}/{backend} auth snapshots.",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    parser.add_argument("--label", metavar="LABEL", help="Display label for the account")
+    parser.add_argument("--slot", type=int, metavar="NUM", help="Store in a specific slot")
+    parser.add_argument("--to", dest="switch_to_alias", metavar="NUM|LABEL")
 
-    add_parser = subparsers.add_parser("add", help="snapshot the active Codex auth")
-    add_parser.add_argument("--label", metavar="LABEL", help="Display label for the account")
-    add_parser.add_argument("--slot", type=int, metavar="NUM", help="Store in a specific slot")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--add-account", action="store_true", help=argparse.SUPPRESS)
+    group.add_argument("--list", action="store_true", help=argparse.SUPPRESS)
+    group.add_argument("--status", action="store_true", help=argparse.SUPPRESS)
+    group.add_argument("--switch", action="store_true", help=argparse.SUPPRESS)
+    group.add_argument("--switch-to", metavar="NUM|LABEL", help=argparse.SUPPRESS)
+    group.add_argument("--remove-account", metavar="NUM|LABEL", help=argparse.SUPPRESS)
 
-    list_parser = subparsers.add_parser("list", aliases=["ls"], help="list Codex accounts")
-    list_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
-
-    status_parser = subparsers.add_parser("status", help="show current Codex account")
-    status_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
-
-    switch_parser = subparsers.add_parser("switch", help="switch Codex auth")
-    switch_parser.add_argument("account", nargs="?", metavar="NUM|LABEL")
-    switch_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
-
-    remove_parser = subparsers.add_parser("remove", aliases=["rm"], help="remove a Codex account")
-    remove_parser.add_argument("account", metavar="NUM|LABEL")
-
-    args = parser.parse_args(argv)
+    args = parser.parse_args(_translate_provider_subcommand(argv))
+    if args.switch_to_alias is not None:
+        if not args.switch:
+            parser.error("--to can only be used with 'switch'")
+        args.switch_to = args.switch_to_alias
+        args.switch = False
+    if args.label is not None and not args.add_account:
+        parser.error("--label can only be used with 'add'")
+    if args.slot is not None and not args.add_account:
+        parser.error("--slot can only be used with 'add'")
+    if args.json and not (args.list or args.status or args.switch or args.switch_to):
+        parser.error("--json can only be used with 'list', 'status', or 'switch'")
     json_mode = bool(getattr(args, "json", False))
     payload: dict | None = None
     try:
-        switcher = CodexAccountSwitcher()
-        if args.command == "add":
-            switcher.add_account(label=args.label, slot=args.slot)
-        elif args.command in ("list", "ls"):
-            payload = switcher.list_accounts(json_output=args.json)
-        elif args.command == "status":
-            payload = switcher.status(json_output=args.json)
-        elif args.command == "switch":
-            payload = switcher.switch(args.account, json_output=args.json)
-        elif args.command in ("remove", "rm"):
-            switcher.remove_account(args.account)
+        provider = get_provider(frontend, backend)
+        if args.add_account:
+            provider.add_account(label=args.label, slot=args.slot)
+        elif args.list:
+            payload = provider.list_accounts(json_output=args.json)
+        elif args.status:
+            payload = provider.status(json_output=args.json)
+        elif args.switch:
+            payload = provider.switch(None, json_output=args.json)
+        elif args.switch_to is not None:
+            payload = provider.switch(args.switch_to, json_output=args.json)
+        elif args.remove_account is not None:
+            provider.remove_account(args.remove_account)
+    except KeyError as exc:
+        err = ConfigError(str(exc))
+        if json_mode:
+            print(json.dumps(error_envelope(err), indent=2))
+        else:
+            error(f"Error: {err}")
+        sys.exit(1)
     except ClaudeSwitchError as e:
         if json_mode:
             print(json.dumps(error_envelope(e), indent=2))
@@ -142,6 +178,18 @@ def _codex_command(argv: list[str]) -> None:
 
     if json_mode and payload is not None:
         print(json.dumps(payload, indent=2))
+
+
+def _codex_command(argv: list[str]) -> None:
+    """Handle `cswap codex openai ...` commands."""
+    parser = argparse.ArgumentParser(prog=f"{_prog_name()} codex")
+    parser.error("codex requires a backend, for example: cswap codex openai list")
+
+
+def _opencode_command(argv: list[str]) -> None:
+    """Handle `cswap opencode openai ...` commands."""
+    parser = argparse.ArgumentParser(prog=f"{_prog_name()} opencode")
+    parser.error("opencode requires a backend, for example: cswap opencode openai list")
 
 
 def _run_command(argv: list[str]) -> None:
@@ -573,7 +621,16 @@ def main() -> None:
         _auto_command(argv[1:])
         return  # only reachable in tests where sys.exit is mocked
     if argv and argv[0] == "codex":
+        if len(argv) >= 2 and argv[1] == "openai":
+            _provider_command("codex", "openai", argv[2:])
+            return
         _codex_command(argv[1:])
+        return
+    if argv and argv[0] == "opencode":
+        if len(argv) >= 2 and argv[1] == "openai":
+            _provider_command("opencode", "openai", argv[2:])
+            return
+        _opencode_command(argv[1:])
         return
     if len(sys.argv) > 1 and sys.argv[1] == "config":
         _config_command(sys.argv[2:])
@@ -606,7 +663,8 @@ Commands:
   %(prog)s remove <num|email>         remove an account
   %(prog)s run <num|email> [-- ...]   run as an account, this terminal only
   %(prog)s auto                       auto-switch when nearing rate limits
-  %(prog)s codex <command>            manage Codex auth snapshots
+  %(prog)s codex openai <command>     manage Codex/OpenAI auth snapshots
+  %(prog)s opencode openai <command>  manage opencode/OpenAI auth snapshots
   %(prog)s config [set KEY VALUE]     show or change settings (settings.json)
   %(prog)s export <path>              export accounts
   %(prog)s import <path>              import accounts
@@ -625,8 +683,10 @@ Aliases: ls=list  rm=remove  update=upgrade""",
   %(prog)s list --json
   %(prog)s add --slot 3                      # add to a specific slot
   %(prog)s add-token sk-ant-oat01-... --email me@example.com
-  %(prog)s codex add --label work
-  %(prog)s codex switch work
+  %(prog)s codex openai add --label work
+  %(prog)s codex openai switch --to work
+  %(prog)s codex openai --switch-to work
+  %(prog)s opencode openai --switch-to work
   %(prog)s run 2 -- --resume                 # forward args after '--' to claude
   %(prog)s auto --once                       # single auto-switch tick (cron-friendly)
   %(prog)s config set autoswitch.threshold 80
@@ -881,26 +941,27 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
                 show_token_status=args.token_status,
                 json_output=args.json,
             )
-            # The Codex section is auxiliary: its state living in a separate
-            # tree must never fail the primary Claude listing (which, in text
-            # mode, has already printed). Degrade to a stderr warning on any
-            # Codex-side error so stdout stays a clean JSON document.
-            try:
-                codex_switcher = CodexAccountSwitcher()
-                if codex_switcher.has_accounts():
-                    if args.json:
-                        if payload is not None:
-                            payload["codex"] = codex_switcher.list_accounts(
-                                json_output=True
-                            )
-                    else:
-                        print()
-                        codex_switcher.list_accounts(json_output=False)
-            except ClaudeSwitchError as codex_err:
-                print(
-                    dimmed(f"Codex accounts unavailable: {codex_err}"),
-                    file=sys.stderr,
-                )
+            # Provider sections are auxiliary: their state living in separate
+            # trees must never fail the primary Claude listing.
+            for provider_store in managed_aggregate_providers():
+                try:
+                    provider_payload = provider_store.list_accounts(json_output=True)
+                    provider_ref = provider_store.definition.ref.frontend
+                    if provider_payload is not None and provider_payload["accounts"]:
+                        if args.json:
+                            if payload is not None:
+                                payload[provider_ref] = provider_payload
+                        else:
+                            print()
+                            provider_store.list_accounts(json_output=False)
+                except ClaudeSwitchError as provider_err:
+                    print(
+                        dimmed(
+                            f"{provider_store.definition.frontend.display_name} "
+                            f"accounts unavailable: {provider_err}"
+                        ),
+                        file=sys.stderr,
+                    )
         elif args.switch:
             payload = switcher.switch(strategy=args.strategy, json_output=args.json)
         elif args.switch_to:
