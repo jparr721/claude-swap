@@ -683,6 +683,15 @@ class TestSubcommandAliases:
             strategy=None, json_output=False
         )
 
+    def test_switch_with_to_flag_is_rejected(self, capsys):
+        """`cswap switch --to 2` must not be accepted as a broad alias."""
+        with patch.object(sys, "argv", ["claude-swap", "switch", "--to", "2"]):
+            with pytest.raises(SystemExit) as excinfo:
+                cli.main()
+
+        assert excinfo.value.code == 2
+        assert "unrecognized arguments" in capsys.readouterr().err
+
     def test_list_subcommand_with_json(self):
         """`cswap list --json` reaches list_accounts(json_output=True)."""
         payload = {"schemaVersion": 1, "accounts": []}

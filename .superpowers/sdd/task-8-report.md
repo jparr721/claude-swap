@@ -32,3 +32,15 @@
 - Existing top-level `list`, `switch`, and related commands still use the same parser path.
 - `--to` is normalized into the existing `switch_to` flow instead of adding a separate code path.
 - No registry change was required for the behavior covered by this task.
+
+## Fix Follow-Up
+- Command:
+  - `uv run pytest tests/test_cli.py::TestSubcommandAliases::test_claude_default_list_dispatches_to_claude_switcher tests/test_cli.py::TestSubcommandAliases::test_claude_default_switch_to_dispatches_to_claude_switcher -v`
+  - `uv run pytest tests/test_cli.py -v`
+- Result:
+  - 2 passed
+  - 88 passed
+- Change:
+  - Removed the global top-level `--to` alias from `src/claude_swap/cli.py`.
+  - Added claude-default-only translation to `--switch-to` before the main parser.
+  - Added a regression test that `cswap switch --to 2` is rejected.
