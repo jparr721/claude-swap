@@ -91,6 +91,21 @@ class TestCLI:
         # ...and the note that they keep working is still present.
         assert "keep working" in result.stdout
 
+    def test_help_mentions_provider_first_commands(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "claude_swap", "--help"],
+            capture_output=True,
+            text=True,
+            env=_subprocess_env(),
+        )
+
+        assert result.returncode == 0
+        assert "cswap claude default list" in result.stdout
+        assert "cswap codex openai list" in result.stdout
+        assert "cswap opencode openai list" in result.stdout
+        assert "cswap codex openai switch --to" in result.stdout
+        assert "cswap opencode openai switch --to" in result.stdout
+
     def test_no_args_shows_error(self):
         """Test that running without args (non-TTY) shows a clean no-command error."""
         result = subprocess.run(

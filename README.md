@@ -77,39 +77,60 @@ Or let claude-swap auto-pick by remaining quota — `cswap switch --strategy bes
 
 **Note:** You usually don't need to restart — on Linux/Windows the new account is picked up automatically, and on macOS after the Keychain cache expires. To apply it instantly, restart Claude Code or reopen the VS Code extension tab. See [Tips](#tips) for the per-platform details.
 
-### Track Codex accounts too
+### Provider-first account switching
+
+Claude, Codex, and opencode are addressed as explicit frontend/backend pairs:
+
+```bash
+cswap claude default list
+cswap codex openai list
+cswap opencode openai list
+cswap claude default switch --to 2
+cswap codex openai switch --to 2
+cswap opencode openai switch --to 2
+```
+
+Top-level Claude commands such as `cswap list` and `cswap switch 2` remain supported. Codex and opencode docs use the canonical provider-first commands.
 
 Codex support is separate from Claude account switching. Log into Codex normally, then snapshot that active auth:
 
 ```bash
 codex login
-cswap codex add --label work
+cswap codex openai add --label work
 ```
 
 Log into another Codex account and add it the same way:
 
 ```bash
 codex login
-cswap codex add --label personal
+cswap codex openai add --label personal
 ```
 
 Switch Codex without changing your Claude account:
 
 ```bash
-cswap codex switch
-cswap codex switch work
+cswap codex openai switch --to work
 ```
 
 Check or remove Codex snapshots:
 
 ```bash
-cswap codex list
-cswap codex status
-cswap codex remove work
-cswap codex list --json
+cswap codex openai list
+cswap codex openai status
+cswap codex openai remove work
+cswap codex openai list --json
 ```
 
-`cswap ls` shows Claude accounts and, when present, a separate Codex accounts section. Codex switching only replaces `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`); it does not edit Codex config, plugins, sessions, hooks, or model settings. Switch while no Codex session is live - a running `codex` that refreshes its token can rewrite `auth.json` and revert a just-completed switch.
+opencode uses a different auth file from Codex. Log into opencode normally, then manage it separately:
+
+```bash
+opencode auth login
+cswap opencode openai add --label work
+cswap opencode openai switch --to work
+cswap opencode openai list
+```
+
+`cswap ls` shows Claude accounts and, when present, separate Codex and opencode account sections. Codex switching only replaces `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`). opencode switching only replaces `$OPENCODE_DATA_HOME/auth.json` (default `~/.local/share/opencode/auth.json`). Provider switching does not edit config, plugins, sessions, hooks, or model settings. Switch while no provider session is live - a running session that refreshes its token can rewrite its auth file and revert a just-completed switch.
 
 ### Automatic switching
 
@@ -181,8 +202,12 @@ cswap list                      # Show all accounts with 5h/7d usage and reset t
 cswap status                    # Show current account
 cswap add --slot 3              # Add account to a specific slot (prompts before overwrite)
 cswap remove 2                  # Remove an account
-cswap codex list                # Show Codex accounts
-cswap codex switch work         # Switch Codex auth only
+cswap claude default list       # Canonical Claude list command
+cswap claude default switch --to 2
+cswap codex openai list         # Show Codex OpenAI accounts
+cswap codex openai switch --to work
+cswap opencode openai list      # Show opencode OpenAI accounts
+cswap opencode openai switch --to work
 cswap tui                       # Interactive dashboard (also: bare `cswap`)
 cswap watch                     # Dashboard, opened on the live watch page
 cswap upgrade                   # Upgrade claude-swap to the latest version
@@ -271,10 +296,12 @@ If an imported account is the one you're currently logged in as, activate the im
 
 ### JSON output for scripting
 
-Add `--json` to `list`, `status`, or `switch` to emit a single machine-readable JSON object on stdout (human-readable notices go to stderr). Useful for scripting auto-swap and quota tracking.
+Add `--json` to `list`, `status`, or `switch` to emit a machine-readable JSON object on stdout (human-readable notices go to stderr). Useful for scripting auto-swap and quota tracking.
 
 ```bash
 cswap list --json                   # all accounts with usage/quota
+cswap claude default list --json    # canonical Claude list form
+cswap codex openai list --json      # canonical provider-first list form
 cswap status --json                 # current active account
 cswap switch --strategy best --json # switch, then report the result
 cswap switch 2 --json
@@ -285,17 +312,37 @@ cswap switch 2 --json
 
 ```json
 {
-  "schemaVersion": 1,
-  "activeAccountNumber": 2,
-  "accounts": [
-    { "number": 2, "email": "you@example.com", "active": true, "usageStatus": "ok",
-      "usage": { "fiveHour": { "pct": 25.0, "resetsAt": "2026-06-22T23:29:59Z" },
-                 "sevenDay": { "pct": 16.0, "resetsAt": "2026-06-26T17:59:59Z" } } }
-  ]
+  "schemaVersion": 2,
+  "providers": {
+    "claude": {
+      "default": {
+        "schemaVersion": 1,
+        "activeAccountNumber": 2,
+        "accounts": [
+          {
+            "number": 2,
+            "email": "you@example.com",
+            "active": true,
+            "usageStatus": "ok",
+            "usage": {
+              "fiveHour": {
+                "pct": 25.0,
+                "resetsAt": "2026-06-22T23:29:59Z"
+              },
+              "sevenDay": {
+                "pct": 16.0,
+                "resetsAt": "2026-06-26T17:59:59Z"
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
 }
 ```
 
-Every payload carries a `schemaVersion` (currently `1`); on a handled error stdout is `{"schemaVersion":1,"error":{...}}` with a non-zero exit code. `--switch`/`--switch-to` report `{"switched": true|false, "from": …, "to": …, "reason": …}`.
+`list --json` now returns a schema v2 provider envelope. Each provider entry contains its existing schema v1 payload. `status --json` and `switch --json` still return their schema v1 payloads directly. On a handled error stdout is `{"schemaVersion":1,"error":{"type":"ConfigError","message":"invalid config"}}` with a non-zero exit code. `--switch` and `--switch-to` report `{"switched": true|false, "from": {"number": 1}, "to": {"number": 2}, "reason": "requested"}`.
 
 Usage is served from a per-account cache: when the usage API is briefly unreachable, the last-known numbers are shown instead of nothing (the human view marks them with their age, e.g. `· 2m ago`). Rows with usage carry additive `usageFetchedAt`/`usageAgeSeconds` fields telling you how old the measurement is.
 

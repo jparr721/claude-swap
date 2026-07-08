@@ -671,17 +671,25 @@ def main() -> None:
 
 Commands:
   %(prog)s help                       show this help
-  %(prog)s list                       list managed accounts
-  %(prog)s status                     show current account
-  %(prog)s switch                     rotate to the next account
-  %(prog)s switch <num|email>         switch to a specific account
+  %(prog)s claude default list        list Claude accounts
+  %(prog)s claude default status      show current Claude account
+  %(prog)s claude default switch      rotate Claude account
+  %(prog)s claude default switch --to N
+                                      switch to a specific Claude account
+  %(prog)s list                       list managed Claude accounts
+  %(prog)s status                     show current Claude account
+  %(prog)s switch                     rotate to the next Claude account
+  %(prog)s switch <num|email>         switch to a specific Claude account
   %(prog)s add                        add the current account
   %(prog)s add-token [TOKEN|-]        register a setup-token or API key
   %(prog)s remove <num|email>         remove an account
   %(prog)s run <num|email> [-- ...]   run as an account, this terminal only
   %(prog)s auto                       auto-switch when nearing rate limits
-  %(prog)s codex openai <command>     manage Codex/OpenAI auth snapshots
-  %(prog)s opencode openai <command>  manage opencode/OpenAI auth snapshots
+  %(prog)s codex openai list          list Codex OpenAI accounts
+  %(prog)s codex openai switch --to N switch Codex OpenAI auth
+  %(prog)s opencode openai list       list opencode OpenAI accounts
+  %(prog)s opencode openai switch --to N
+                                      switch opencode OpenAI auth
   %(prog)s config [set KEY VALUE]     show or change settings (settings.json)
   %(prog)s export <path>              export accounts
   %(prog)s import <path>              import accounts
@@ -694,16 +702,18 @@ Commands:
 Aliases: ls=list  rm=remove  update=upgrade""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Flags combine with subcommands:
+  %(prog)s claude default list
+  %(prog)s claude default switch --to 2
   %(prog)s switch --strategy best           # pick the account with most quota left
   %(prog)s switch --strategy next-available # rotate, skipping rate-limited accounts
   %(prog)s switch user@example.com
   %(prog)s list --json
   %(prog)s add --slot 3                      # add to a specific slot
   %(prog)s add-token sk-ant-oat01-... --email me@example.com
-  %(prog)s codex openai add --label work
-  %(prog)s codex openai switch --to work
-  %(prog)s codex openai --switch-to work
-  %(prog)s opencode openai --switch-to work
+  %(prog)s codex openai list
+  %(prog)s codex openai switch --to 2
+  %(prog)s opencode openai list
+  %(prog)s opencode openai switch --to 2
   %(prog)s run 2 -- --resume                 # forward args after '--' to claude
   %(prog)s auto --once                       # single auto-switch tick (cron-friendly)
   %(prog)s config set autoswitch.threshold 80
