@@ -66,14 +66,25 @@ def _opencode_store() -> ProviderAccountStore:
     )
 
 
-def test_codex_store_adds_and_lists_account(temp_home: Path) -> None:
-    _write(temp_home / ".codex" / "auth.json", _codex_auth("acct-1"))
+def test_codex_store_adds_and_lists_account(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    auth_payload = _codex_auth("acct-1")
+    _write(temp_home / ".codex" / "auth.json", auth_payload)
     store = _codex_store()
+    backend_calls: list[tuple[str, float]] = []
+
+    def _fake_fetch_usage(auth_text: str, timeout_s: float) -> dict[str, object]:
+        backend_calls.append((auth_text, timeout_s))
+        return {"windows": [{"label": "Monthly", "pct": 12.0}]}
+
+    monkeypatch.setattr(store.definition.backend, "fetch_usage", _fake_fetch_usage)
 
     store.add_account(label="work", slot=1)
     payload = store.list_accounts(json_output=True)
 
-    assert payload["schemaVersion"] == 1
+    assert backend_calls == [(json.dumps(auth_payload), 10.0)]
+    assert payload["schemaVersion"] == 2
     assert payload["provider"] == {"frontend": "codex", "backend": "openai"}
     assert payload["activeAccountNumber"] == 1
     assert payload["accounts"][0]["label"] == "work"

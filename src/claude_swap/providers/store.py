@@ -12,9 +12,9 @@ from typing import Any
 
 from claude_swap import oauth
 from claude_swap.exceptions import AccountNotFoundError, ConfigError, ValidationError
-from claude_swap.json_output import SCHEMA_VERSION, usage_freshness_fields
 from claude_swap.locking import FileLock
 from claude_swap.models import get_timestamp
+from claude_swap.json_output import usage_freshness_fields
 from claude_swap.printer import accent, bolded, dimmed, format_age, muted
 from claude_swap.providers.openai import OPENAI_USAGE_TIMEOUT_S
 from claude_swap.providers.types import (
@@ -22,7 +22,7 @@ from claude_swap.providers.types import (
     ProviderDefinition,
     UsageFetchError,
 )
-from claude_swap.usage_store import FetchRecord, UsageEntry, UsageStore
+from claude_swap.usage_store import FetchRecord, SCHEMA_VERSION, UsageEntry, UsageStore
 
 _USAGE_AGE_NOTE_S = 90.0
 
