@@ -1,61 +1,41 @@
-"""Tests for provider registry type foundations."""
-
 from __future__ import annotations
-
-from pathlib import Path
 
 import pytest
 
-from claude_swap.providers.types import (
-    AuthMetadata,
-    BackendAdapter,
-    FrontendAdapter,
-    ProviderDefinition,
-    ProviderRef,
-    UsageFetchError,
+from claude_swap.providers.registry import (
+    get_provider,
+    managed_aggregate_providers,
+    provider_definitions,
 )
 
 
-def test_provider_type_dataclasses_and_display_name() -> None:
-    metadata = AuthMetadata(
-        account_id="acct-1",
-        auth_mode="oauth",
-        fingerprint="fingerprint",
-        access_token="token",
-    )
-    error = UsageFetchError(message="usage unavailable", retry_after_s=3.5)
+def test_registry_contains_initial_provider_pairs() -> None:
+    keys = {
+        (definition.ref.frontend, definition.ref.backend)
+        for definition in provider_definitions()
+    }
 
-    class _Frontend:
-        provider_ref = ("codex", "openai")
-        display_name = "Codex"
-        login_command = "codex login"
-
-        def active_auth_path(self) -> Path:
-            return Path("/tmp/auth.json")
-
-    class _Backend:
-        backend_id = "openai"
-        display_name = "OpenAI"
-
-        def metadata_from_text(self, text: str) -> AuthMetadata:
-            return metadata
-
-        def fetch_usage(self, auth_text: str, timeout_s: float):
-            return error
-
-    definition = ProviderDefinition(
-        ref=ProviderRef(frontend="codex", backend="openai"),
-        frontend=_Frontend(),
-        backend=_Backend(),
-        state_dir=Path("/tmp/state"),
-        default_label_prefix="codex-account",
-    )
-
-    assert metadata.account_id == "acct-1"
-    assert error.retry_after_s == 3.5
-    assert definition.display_name == "Codex / OpenAI"
+    assert ("codex", "openai") in keys
+    assert ("opencode", "openai") in keys
 
 
-def test_provider_protocols_are_importable() -> None:
-    assert FrontendAdapter.__name__ == "FrontendAdapter"
-    assert BackendAdapter.__name__ == "BackendAdapter"
+def test_get_provider_returns_store_for_codex_openai() -> None:
+    store = get_provider("codex", "openai")
+
+    assert store.definition.ref.frontend == "codex"
+    assert store.definition.ref.backend == "openai"
+    assert store.definition.default_label_prefix == "codex-openai-account"
+
+
+def test_get_provider_rejects_unknown_backend() -> None:
+    with pytest.raises(KeyError, match="Unknown provider: opencode/anthropic"):
+        get_provider("opencode", "anthropic")
+
+
+def test_managed_aggregate_providers_returns_all_registered_stores() -> None:
+    providers = managed_aggregate_providers()
+
+    assert [(store.definition.ref.frontend, store.definition.ref.backend) for store in providers] == [
+        ("codex", "openai"),
+        ("opencode", "openai"),
+    ]
