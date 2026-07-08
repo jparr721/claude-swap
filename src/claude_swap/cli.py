@@ -620,6 +620,8 @@ def main() -> None:
     if argv and argv[0] == "auto":
         _auto_command(argv[1:])
         return  # only reachable in tests where sys.exit is mocked
+    if argv and argv[0] == "claude" and len(argv) >= 2 and argv[1] == "default":
+        argv = _translate_subcommand(argv[2:])
     if argv and argv[0] == "codex":
         if len(argv) >= 2 and argv[1] == "openai":
             _provider_command("codex", "openai", argv[2:])
@@ -759,6 +761,7 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
             "login first"
         ),
     )
+    parser.add_argument("--to", dest="switch_to_alias", metavar="NUM|EMAIL")
     parser.add_argument(
         "--full",
         action="store_true",
@@ -847,6 +850,11 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
     )
 
     args = parser.parse_args(argv)
+    if args.switch_to_alias is not None:
+        if not args.switch:
+            parser.error("--to can only be used with 'switch'")
+        args.switch_to = args.switch_to_alias
+        args.switch = False
 
     # No action selected: emit a clean, subcommand-oriented message rather than
     # the raw argparse "one of the arguments ... is required" (which would list

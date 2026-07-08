@@ -891,6 +891,35 @@ class TestSubcommandAliases:
         get_provider.return_value.list_accounts.assert_called_once_with(json_output=True)
         assert json.loads(capsys.readouterr().out) == payload
 
+    def test_claude_default_list_dispatches_to_claude_switcher(self):
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch.object(sys, "argv", ["claude-swap", "claude", "default", "list"]), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch("claude_swap.update_check.check_for_update", return_value=None):
+            cli.main()
+
+        switcher_cls.return_value.list_accounts.assert_called_once_with(
+            show_token_status=False,
+            json_output=False,
+        )
+
+    def test_claude_default_switch_to_dispatches_to_claude_switcher(self):
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch.object(
+                 sys,
+                 "argv",
+                 ["claude-swap", "claude", "default", "switch", "--to", "2"],
+             ), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch("claude_swap.update_check.check_for_update", return_value=None):
+            cli.main()
+
+        switcher_cls.return_value.switch_to.assert_called_once_with(
+            "2",
+            json_output=False,
+            force=False,
+        )
+
     def test_run_subcommand_still_dispatches(self):
         """`cswap run 2` keeps reaching the session pre-dispatch (not translated)."""
         calls = []
