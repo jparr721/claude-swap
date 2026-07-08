@@ -133,7 +133,13 @@ def _provider_command(frontend: str, backend: str, argv: list[str]) -> None:
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     parser.add_argument("--label", metavar="LABEL", help="Display label for the account")
     parser.add_argument("--slot", type=int, metavar="NUM", help="Store in a specific slot")
-    parser.add_argument("--to", dest="switch_to_alias", metavar="NUM|LABEL")
+    switch_help = argparse.SUPPRESS if backend == "openai" else None
+    parser.add_argument(
+        "--to",
+        dest="switch_to_alias",
+        metavar="NUM|LABEL",
+        help=switch_help,
+    )
 
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--add-account", action="store_true", help=argparse.SUPPRESS)
@@ -686,10 +692,7 @@ Commands:
   %(prog)s run <num|email> [-- ...]   run as an account, this terminal only
   %(prog)s auto                       auto-switch when nearing rate limits
   %(prog)s codex openai list          list Codex OpenAI accounts
-  %(prog)s codex openai switch --to N switch Codex OpenAI auth
   %(prog)s opencode openai list       list opencode OpenAI accounts
-  %(prog)s opencode openai switch --to N
-                                      switch opencode OpenAI auth
   %(prog)s config [set KEY VALUE]     show or change settings (settings.json)
   %(prog)s export <path>              export accounts
   %(prog)s import <path>              import accounts
@@ -711,9 +714,7 @@ Aliases: ls=list  rm=remove  update=upgrade""",
   %(prog)s add --slot 3                      # add to a specific slot
   %(prog)s add-token sk-ant-oat01-... --email me@example.com
   %(prog)s codex openai list
-  %(prog)s codex openai switch --to 2
   %(prog)s opencode openai list
-  %(prog)s opencode openai switch --to 2
   %(prog)s run 2 -- --resume                 # forward args after '--' to claude
   %(prog)s auto --once                       # single auto-switch tick (cron-friendly)
   %(prog)s config set autoswitch.threshold 80

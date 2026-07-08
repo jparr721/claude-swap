@@ -103,8 +103,20 @@ class TestCLI:
         assert "cswap claude default list" in result.stdout
         assert "cswap codex openai list" in result.stdout
         assert "cswap opencode openai list" in result.stdout
-        assert "cswap codex openai switch --to" in result.stdout
-        assert "cswap opencode openai switch --to" in result.stdout
+        assert "cswap codex openai switch --to" not in result.stdout
+        assert "cswap opencode openai switch --to" not in result.stdout
+
+    def test_openai_provider_help_does_not_advertise_switch_target(self):
+        for frontend in ["codex", "opencode"]:
+            result = subprocess.run(
+                [sys.executable, "-m", "claude_swap", frontend, "openai", "--help"],
+                capture_output=True,
+                text=True,
+                env=_subprocess_env(),
+            )
+
+            assert result.returncode == 0
+            assert "--to" not in result.stdout
 
     def test_no_args_shows_error(self):
         """Test that running without args (non-TTY) shows a clean no-command error."""

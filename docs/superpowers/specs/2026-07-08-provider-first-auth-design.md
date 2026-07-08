@@ -27,17 +27,15 @@ cswap claude default remove 2
 cswap codex openai list
 cswap codex openai status
 cswap codex openai add
-cswap codex openai switch
-cswap codex openai switch --to 2
 cswap codex openai remove 2
 
 cswap opencode openai list
 cswap opencode openai status
 cswap opencode openai add
-cswap opencode openai switch
-cswap opencode openai switch --to 2
 cswap opencode openai remove 2
 ```
+
+Codex/OpenAI and opencode/OpenAI switching is intentionally refused. These providers track snapshots for list/status/remove and usage display, but stale OpenAI OAuth snapshots must not be restored into active auth files because they can invalidate Codex, opencode, and browser sessions. To change account, run `codex login` or `opencode auth login`, then add the active account again.
 
 Compatibility aliases remain for existing users:
 
@@ -48,7 +46,6 @@ Compatibility aliases remain for existing users:
 - `cswap switch 2` -> `cswap claude default switch --to 2`
 - `cswap claude list` -> `cswap claude default list`
 - `cswap codex list` -> `cswap codex openai list`
-- `cswap codex switch 2` -> `cswap codex openai switch --to 2`
 
 There is no `cswap opencode list` shorthand. opencode must always specify its backend, for example `cswap opencode openai list`.
 

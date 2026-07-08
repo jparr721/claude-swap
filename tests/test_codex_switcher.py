@@ -195,7 +195,7 @@ def test_codex_wrapper_uses_provider_store_and_compat_usage_hook(
     assert payload["accounts"][0]["usageStatus"] == "ok"
 
 
-def test_opencode_wrapper_switches_only_opencode_auth(
+def test_opencode_wrapper_refuses_to_restore_openai_oauth_snapshot(
     temp_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     auth_path = _write_opencode_auth(temp_home, _opencode_auth("acct-1"))
@@ -208,13 +208,14 @@ def test_opencode_wrapper_switches_only_opencode_auth(
     auth_path.write_text(json.dumps(_opencode_auth("acct-2")), encoding="utf-8")
     switcher.add_account(label="two", slot=2)
 
-    switcher.switch("1", json_output=False)
+    with pytest.raises(ConfigError, match="cannot safely restore stored OpenAI OAuth"):
+        switcher.switch("1", json_output=False)
 
     active = json.loads(auth_path.read_text(encoding="utf-8"))
-    assert active["openai"]["accountId"] == "acct-1"
+    assert active["openai"]["accountId"] == "acct-2"
     assert switcher.status(json_output=True)["active"] == {
-        "number": 1,
-        "label": "one",
+        "number": 2,
+        "label": "two",
         "managed": True,
     }
     assert switcher.list_accounts(json_output=True)["provider"] == {

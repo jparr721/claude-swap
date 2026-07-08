@@ -77,7 +77,7 @@ Or let claude-swap auto-pick by remaining quota — `cswap switch --strategy bes
 
 **Note:** You usually don't need to restart — on Linux/Windows the new account is picked up automatically, and on macOS after the Keychain cache expires. To apply it instantly, restart Claude Code or reopen the VS Code extension tab. See [Tips](#tips) for the per-platform details.
 
-### Provider-first account switching
+### Provider-first account management
 
 Claude, Codex, and opencode are addressed as explicit frontend/backend pairs:
 
@@ -86,8 +86,6 @@ cswap claude default list
 cswap codex openai list
 cswap opencode openai list
 cswap claude default switch --to 2
-cswap codex openai switch --to 2
-cswap opencode openai switch --to 2
 ```
 
 Top-level Claude commands such as `cswap list` and `cswap switch 2` remain supported. Codex and opencode docs use the canonical provider-first commands.
@@ -106,12 +104,6 @@ codex login
 cswap codex openai add --label personal
 ```
 
-Switch Codex without changing your Claude account:
-
-```bash
-cswap codex openai switch --to work
-```
-
 Check or remove Codex snapshots:
 
 ```bash
@@ -126,11 +118,10 @@ opencode uses a different auth file from Codex. Log into opencode normally, then
 ```bash
 opencode auth login
 cswap opencode openai add --label work
-cswap opencode openai switch --to work
 cswap opencode openai list
 ```
 
-`cswap ls` shows Claude accounts and, when present, separate Codex and opencode account sections. Codex switching only replaces `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`). opencode switching only replaces `$OPENCODE_DATA_HOME/auth.json` (default `~/.local/share/opencode/auth.json`). Provider switching does not edit config, plugins, sessions, hooks, or model settings. Switch while no provider session is live - a running session that refreshes its token can rewrite its auth file and revert a just-completed switch.
+`cswap ls` shows Claude accounts and, when present, separate Codex and opencode account sections. Codex auth stays in `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`). opencode auth stays in `$OPENCODE_DATA_HOME/auth.json` (default `~/.local/share/opencode/auth.json`). OpenAI OAuth snapshots are tracked for status and usage, but restoring them into active auth files is intentionally refused because stale refresh-token snapshots can invalidate Codex, opencode, and browser sessions. To change Codex or opencode accounts, use `codex login` or `opencode auth login`, then run the matching `cswap ... add` command again.
 
 ### Automatic switching
 
@@ -205,9 +196,7 @@ cswap remove 2                  # Remove an account
 cswap claude default list       # Canonical Claude list command
 cswap claude default switch --to 2
 cswap codex openai list         # Show Codex OpenAI accounts
-cswap codex openai switch --to work
 cswap opencode openai list      # Show opencode OpenAI accounts
-cswap opencode openai switch --to work
 cswap tui                       # Interactive dashboard (also: bare `cswap`)
 cswap watch                     # Dashboard, opened on the live watch page
 cswap upgrade                   # Upgrade claude-swap to the latest version

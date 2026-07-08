@@ -645,6 +645,12 @@ class ProviderAccountStore:
 
     def switch(self, identifier: str | None, json_output: bool) -> dict | None:
         self._setup_directories()
+        if self.definition.ref.backend == "openai":
+            raise ConfigError(
+                f"{self.definition.display_name} cannot safely restore stored OpenAI OAuth "
+                f"snapshots. Run '{self.definition.frontend.login_command}' for the target "
+                "account, then re-add it."
+            )
         with FileLock(self.lock_file):
             data = self._sequence_data()
             if not data.get("accounts"):
