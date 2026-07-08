@@ -101,6 +101,7 @@ class TestJsonHelpers:
         from claude_swap.json_output import (
             USAGE_KEYCHAIN_UNAVAILABLE,
             USAGE_NO_CREDENTIALS,
+            USAGE_RELOGIN_REQUIRED,
             USAGE_TOKEN_EXPIRED,
         )
 
@@ -110,6 +111,7 @@ class TestJsonHelpers:
         assert usage_fields("no credentials") == ("no_credentials", None)
         assert usage_fields(USAGE_TOKEN_EXPIRED) == ("token_expired", None)
         assert usage_fields(USAGE_KEYCHAIN_UNAVAILABLE) == ("keychain_unavailable", None)
+        assert usage_fields(USAGE_RELOGIN_REQUIRED) == ("relogin_required", None)
         assert usage_fields(None) == ("unavailable", None)
 
     def test_error_envelope_shape(self):

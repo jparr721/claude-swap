@@ -11,7 +11,7 @@ from claude_swap import __version__
 from claude_swap.codex import CodexAccountSwitcher
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import error_envelope
-from claude_swap.printer import dimmed, error, muted
+from claude_swap.printer import dimmed, error, force_utf8_output, muted
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
@@ -561,6 +561,7 @@ def _use_native_tls() -> None:
 
 def main() -> None:
     """Main entry point for the CLI."""
+    force_utf8_output()
     _use_native_tls()
     argv = sys.argv[1:]
 
