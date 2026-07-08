@@ -14,6 +14,7 @@ from claude_swap import oauth
 
 # Bump only on a breaking change to any payload shape. Scripts key off this.
 SCHEMA_VERSION = 1
+SCHEMA_VERSION_V2 = 2
 
 # Sentinel entries that ``_collect_usage`` / ``_fetch_active_usage`` yield in place
 # of a usage dict. Kept here (the serialization hub) so the human renderer and the
@@ -169,4 +170,12 @@ def error_envelope(exc: Exception) -> dict:
     return {
         "schemaVersion": SCHEMA_VERSION,
         "error": {"type": type(exc).__name__, "message": str(exc)},
+    }
+
+
+def provider_envelope(providers: dict[str, dict[str, dict]]) -> dict:
+    """The schema-v2 aggregate provider envelope for `cswap list --json`."""
+    return {
+        "schemaVersion": SCHEMA_VERSION_V2,
+        "providers": providers,
     }

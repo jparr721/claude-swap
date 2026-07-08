@@ -14,6 +14,7 @@ from claude_swap.exceptions import ConfigError, SwitchError
 from claude_swap.json_output import (
     SCHEMA_VERSION,
     error_envelope,
+    provider_envelope,
     usage_fields,
     usage_to_json,
 )
@@ -119,6 +120,19 @@ class TestJsonHelpers:
         assert env == {
             "schemaVersion": SCHEMA_VERSION,
             "error": {"type": "SwitchError", "message": "boom"},
+        }
+
+    def test_provider_envelope_shape(self):
+        env = provider_envelope({
+            "claude": {"default": {"schemaVersion": 1, "accounts": []}},
+            "codex": {"openai": {"schemaVersion": 1, "accounts": []}},
+        })
+        assert env == {
+            "schemaVersion": 2,
+            "providers": {
+                "claude": {"default": {"schemaVersion": 1, "accounts": []}},
+                "codex": {"openai": {"schemaVersion": 1, "accounts": []}},
+            },
         }
 
 

@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 import pytest
 
@@ -747,16 +747,24 @@ class TestSubcommandAliases:
         claude_cls.return_value.list_accounts.assert_called_once()
         assert "Codex accounts unavailable" in capsys.readouterr().err
 
-    def test_list_json_embeds_codex_accounts(self, capsys):
-        """`cswap list --json` nests Codex under `codex`, keeping Claude keys intact."""
-        claude_payload = {"schemaVersion": 1, "activeAccountNumber": None, "accounts": []}
-        codex_payload = {"schemaVersion": 1, "provider": "codex", "accounts": []}
-        provider_store = MagicMock()
-        provider_store.definition.ref.frontend = "codex"
-        provider_store.list_accounts.return_value = {
-            **codex_payload,
-            "accounts": [{"number": 1}],
+    def test_list_json_emits_schema_v2_provider_envelope(self, capsys):
+        claude_payload = {
+            "schemaVersion": 1,
+            "activeAccountNumber": 2,
+            "accounts": [{"number": 2, "email": "me@example.com", "active": True}],
         }
+        codex_payload = {
+            "schemaVersion": 1,
+            "provider": {"frontend": "codex", "backend": "openai"},
+            "activeAccountNumber": 1,
+            "accounts": [],
+        }
+
+        provider_store = Mock()
+        provider_store.definition.ref.frontend = "codex"
+        provider_store.definition.ref.backend = "openai"
+        provider_store.list_accounts.return_value = codex_payload
+
         with patch("claude_swap.cli.ClaudeAccountSwitcher") as claude_cls, \
              patch(
                  "claude_swap.cli.managed_aggregate_providers",
@@ -769,19 +777,25 @@ class TestSubcommandAliases:
             cli.main()
 
         out = json.loads(capsys.readouterr().out)
-        assert out["accounts"] == []
-        assert out["codex"] == {**codex_payload, "accounts": [{"number": 1}]}
+        assert out["schemaVersion"] == 2
+        assert out["providers"]["claude"]["default"]["accounts"][0]["email"] == "me@example.com"
+        assert out["providers"]["codex"]["openai"]["accounts"] == []
+        assert "accounts" not in out
+        assert "codex" not in out
 
-    def test_list_json_omits_codex_when_no_codex_accounts(self, capsys):
-        """No Codex accounts means no `codex` key at all."""
-        claude_payload = {"schemaVersion": 1, "activeAccountNumber": None, "accounts": []}
-        provider_store = MagicMock()
-        provider_store.definition.ref.frontend = "codex"
-        provider_store.list_accounts.return_value = {
+    def test_list_json_nests_provider_errors_by_frontend_and_backend(self, capsys):
+        from claude_swap.exceptions import ConfigError
+
+        claude_payload = {
             "schemaVersion": 1,
-            "provider": "codex",
+            "activeAccountNumber": None,
             "accounts": [],
         }
+        provider_store = Mock()
+        provider_store.definition.ref.frontend = "codex"
+        provider_store.definition.ref.backend = "openai"
+        provider_store.list_accounts.side_effect = ConfigError("Codex state file is not valid JSON")
+
         with patch("claude_swap.cli.ClaudeAccountSwitcher") as claude_cls, \
              patch(
                  "claude_swap.cli.managed_aggregate_providers",
@@ -793,7 +807,13 @@ class TestSubcommandAliases:
             claude_cls.return_value.list_accounts.return_value = claude_payload
             cli.main()
 
-        assert "codex" not in json.loads(capsys.readouterr().out)
+        out = json.loads(capsys.readouterr().out)
+        assert out["providers"]["codex"]["openai"] == {
+            "error": {
+                "type": "ConfigError",
+                "message": "Codex state file is not valid JSON",
+            }
+        }
 
     def test_codex_requires_backend(self, capsys):
         with patch.object(sys, "argv", ["claude-swap", "codex", "list"]):
@@ -924,6 +944,7 @@ class TestJsonOutputCli:
     def test_list_json_serialized_to_stdout(self, capsys):
         payload = {"schemaVersion": 1, "activeAccountNumber": None, "accounts": []}
         with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch("claude_swap.cli.managed_aggregate_providers", return_value=[]), \
              patch.object(sys, "argv", ["claude-swap", "--list", "--json"]), \
              patch("os.geteuid", return_value=1000, create=True), \
              patch("claude_swap.update_check.check_for_update", return_value=None):
@@ -934,7 +955,14 @@ class TestJsonOutputCli:
             show_token_status=False, json_output=True,
         )
         out = capsys.readouterr().out
-        assert json.loads(out) == payload  # exactly one JSON object, no extra text
+        assert json.loads(out) == {
+            "schemaVersion": 2,
+            "providers": {
+                "claude": {
+                    "default": payload,
+                }
+            },
+        }
 
     def test_switch_json_forwarded_and_serialized(self, capsys):
         payload = {"schemaVersion": 1, "switched": True}

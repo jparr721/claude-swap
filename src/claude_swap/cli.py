@@ -9,7 +9,7 @@ import sys
 
 from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError, ConfigError
-from claude_swap.json_output import error_envelope
+from claude_swap.json_output import error_envelope, provider_envelope
 from claude_swap.printer import dimmed, error, force_utf8_output, muted
 from claude_swap.providers.registry import get_provider, managed_aggregate_providers
 from claude_swap.switcher import ClaudeAccountSwitcher
@@ -943,25 +943,41 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
             )
             # Provider sections are auxiliary: their state living in separate
             # trees must never fail the primary Claude listing.
+            provider_payloads: dict[str, dict[str, dict]] | None = None
+            if args.json:
+                provider_payloads = {"claude": {"default": payload or {}}}
             for provider_store in managed_aggregate_providers():
                 try:
                     provider_payload = provider_store.list_accounts(json_output=True)
-                    provider_ref = provider_store.definition.ref.frontend
-                    if provider_payload is not None and provider_payload["accounts"]:
-                        if args.json:
-                            if payload is not None:
-                                payload[provider_ref] = provider_payload
-                        else:
-                            print()
-                            provider_store.list_accounts(json_output=False)
+                    provider_ref = provider_store.definition.ref
+                    if args.json:
+                        provider_payloads.setdefault(provider_ref.frontend, {})[
+                            provider_ref.backend
+                        ] = provider_payload or {}
+                    elif provider_payload is not None and provider_payload["accounts"]:
+                        print()
+                        provider_store.list_accounts(json_output=False)
                 except ClaudeSwitchError as provider_err:
-                    print(
-                        dimmed(
-                            f"{provider_store.definition.frontend.display_name} "
-                            f"accounts unavailable: {provider_err}"
-                        ),
-                        file=sys.stderr,
-                    )
+                    if args.json:
+                        provider_ref = provider_store.definition.ref
+                        provider_payloads.setdefault(provider_ref.frontend, {})[
+                            provider_ref.backend
+                        ] = {
+                            "error": {
+                                "type": provider_err.__class__.__name__,
+                                "message": str(provider_err),
+                            }
+                        }
+                    else:
+                        print(
+                            dimmed(
+                                f"{provider_store.definition.frontend.display_name} "
+                                f"accounts unavailable: {provider_err}"
+                            ),
+                            file=sys.stderr,
+                        )
+            if args.json and provider_payloads is not None:
+                payload = provider_envelope(provider_payloads)
         elif args.switch:
             payload = switcher.switch(strategy=args.strategy, json_output=args.json)
         elif args.switch_to:
