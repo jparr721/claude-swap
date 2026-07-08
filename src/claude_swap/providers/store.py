@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ from claude_swap.exceptions import AccountNotFoundError, ConfigError, Validation
 from claude_swap.locking import FileLock
 from claude_swap.models import get_timestamp
 from claude_swap.json_output import usage_freshness_fields
+from claude_swap.paths import get_backup_root
 from claude_swap.printer import accent, bolded, dimmed, format_age, muted
 from claude_swap.providers.openai import OPENAI_USAGE_TIMEOUT_S
 from claude_swap.providers.types import (
@@ -25,6 +27,23 @@ from claude_swap.providers.types import (
 from claude_swap.usage_store import FetchRecord, SCHEMA_VERSION, UsageEntry, UsageStore
 
 _USAGE_AGE_NOTE_S = 90.0
+
+
+def _source_state_dir(definition: ProviderDefinition) -> Path | None:
+    if definition.ref.frontend == "codex" and definition.ref.backend == "openai":
+        return get_backup_root() / "codex"
+    return None
+
+
+def materialize_provider_store(definition: ProviderDefinition) -> bool:
+    source = _source_state_dir(definition)
+    if source is None or definition.state_dir.exists() or not source.exists():
+        return False
+    definition.state_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, definition.state_dir)
+    if sys.platform != "win32":
+        os.chmod(definition.state_dir, 0o700)
+    return True
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -156,6 +175,7 @@ def _usage_fields(entry: UsageEntry) -> tuple[str, dict[str, Any] | None]:
 
 class ProviderAccountStore:
     def __init__(self, definition: ProviderDefinition) -> None:
+        materialize_provider_store(definition)
         self.definition = definition
         self.state_dir = definition.state_dir
         self.auth_dir = self.state_dir / "auth"
