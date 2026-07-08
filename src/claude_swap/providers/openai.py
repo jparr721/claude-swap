@@ -13,6 +13,7 @@ from claude_swap.exceptions import ConfigError
 from claude_swap.providers.types import AuthMetadata, UsageFetchError
 
 OPENAI_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+OPENAI_USAGE_TIMEOUT_S = 10.0
 
 
 def _fingerprint(text: str) -> str:
