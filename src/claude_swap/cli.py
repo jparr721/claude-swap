@@ -880,20 +880,26 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
                 show_token_status=args.token_status,
                 json_output=args.json,
             )
-            if not args.json:
-                # The Codex section is auxiliary: its state living in a separate
-                # tree must never fail the primary Claude listing (which has
-                # already printed). Degrade to a warning on any Codex-side error.
-                try:
-                    codex_switcher = CodexAccountSwitcher()
-                    if codex_switcher.has_accounts():
+            # The Codex section is auxiliary: its state living in a separate
+            # tree must never fail the primary Claude listing (which, in text
+            # mode, has already printed). Degrade to a stderr warning on any
+            # Codex-side error so stdout stays a clean JSON document.
+            try:
+                codex_switcher = CodexAccountSwitcher()
+                if codex_switcher.has_accounts():
+                    if args.json:
+                        if payload is not None:
+                            payload["codex"] = codex_switcher.list_accounts(
+                                json_output=True
+                            )
+                    else:
                         print()
                         codex_switcher.list_accounts(json_output=False)
-                except ClaudeSwitchError as codex_err:
-                    print(
-                        dimmed(f"Codex accounts unavailable: {codex_err}"),
-                        file=sys.stderr,
-                    )
+            except ClaudeSwitchError as codex_err:
+                print(
+                    dimmed(f"Codex accounts unavailable: {codex_err}"),
+                    file=sys.stderr,
+                )
         elif args.switch:
             payload = switcher.switch(strategy=args.strategy, json_output=args.json)
         elif args.switch_to:

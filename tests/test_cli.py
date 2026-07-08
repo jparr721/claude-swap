@@ -729,19 +729,39 @@ class TestSubcommandAliases:
         claude_cls.return_value.list_accounts.assert_called_once()
         assert "Codex accounts unavailable" in capsys.readouterr().err
 
-    def test_list_json_does_not_append_codex_accounts(self):
-        """`cswap list --json` remains Claude-compatible."""
-        payload = {"schemaVersion": 1, "accounts": []}
+    def test_list_json_embeds_codex_accounts(self, capsys):
+        """`cswap list --json` nests Codex under `codex`, keeping Claude keys intact."""
+        claude_payload = {"schemaVersion": 1, "activeAccountNumber": None, "accounts": []}
+        codex_payload = {"schemaVersion": 1, "provider": "codex", "accounts": []}
         with patch("claude_swap.cli.ClaudeAccountSwitcher") as claude_cls, \
              patch("claude_swap.cli.CodexAccountSwitcher") as codex_cls, \
              patch.object(sys, "argv", ["claude-swap", "list", "--json"]), \
              patch("os.geteuid", return_value=1000, create=True), \
              patch("claude_swap.update_check.check_for_update", return_value=None):
-            claude_cls.return_value.list_accounts.return_value = payload
+            claude_cls.return_value.list_accounts.return_value = claude_payload
             codex_cls.return_value.has_accounts.return_value = True
+            codex_cls.return_value.list_accounts.return_value = codex_payload
+            cli.main()
+
+        codex_cls.return_value.list_accounts.assert_called_once_with(json_output=True)
+        out = json.loads(capsys.readouterr().out)
+        assert out["accounts"] == []
+        assert out["codex"] == codex_payload
+
+    def test_list_json_omits_codex_when_no_codex_accounts(self, capsys):
+        """No Codex accounts means no `codex` key at all."""
+        claude_payload = {"schemaVersion": 1, "activeAccountNumber": None, "accounts": []}
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as claude_cls, \
+             patch("claude_swap.cli.CodexAccountSwitcher") as codex_cls, \
+             patch.object(sys, "argv", ["claude-swap", "list", "--json"]), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch("claude_swap.update_check.check_for_update", return_value=None):
+            claude_cls.return_value.list_accounts.return_value = claude_payload
+            codex_cls.return_value.has_accounts.return_value = False
             cli.main()
 
         codex_cls.return_value.list_accounts.assert_not_called()
+        assert "codex" not in json.loads(capsys.readouterr().out)
 
     def test_codex_add_dispatches(self):
         """`cswap codex add` dispatches with label and slot."""
