@@ -296,6 +296,29 @@ class ProviderAccountStore:
             return None
         return Path(os.path.realpath(self.auth_path))
 
+    def _adopt_active_real_file(self, data: dict[str, Any]) -> None:
+        """Fold a pre-symlink real auth.json into its managed account's target.
+
+        Before the first symlink switch the active auth file is a real file that
+        Codex has been rotating in place - the freshest copy of whichever account
+        is live. Copy it into that account's target file so repointing the
+        symlink away never loses it. Refuse if it belongs to no managed account,
+        rather than silently discarding a live credential.
+        """
+        if self.auth_path.is_symlink():
+            return
+        text = self._read_active_auth()
+        if text is None:
+            return
+        num = self._current_account_number(data, text)
+        if num is None:
+            ref = self.definition.ref
+            raise ConfigError(
+                f"The active {self.definition.display_name} auth is not a managed "
+                f"account. Add it first with: cswap {ref.frontend} {ref.backend} add"
+            )
+        self._write_account_auth(num, text)
+
     def _read_account_auth(self, account_num: str) -> str:
         try:
             return self._auth_backup_path(account_num).read_text(encoding="utf-8")

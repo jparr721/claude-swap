@@ -240,3 +240,40 @@ def test_codex_writethrough_symlink_updates_target(temp_home: Path) -> None:
 
     assert store.auth_path.is_symlink()  # write followed the symlink; it stays a symlink
     assert '"ROTATED"' in target.read_text(encoding="utf-8")
+
+
+def test_adopt_active_real_file_preserves_managed_account(temp_home: Path) -> None:
+    store = _codex_store()
+    store._setup_directories()
+    store._init_sequence_file()
+    old = {"auth_mode": "chatgpt", "tokens": {"account_id": "acct-1", "access_token": "OLD"}}
+    fresh = {"auth_mode": "chatgpt", "tokens": {"account_id": "acct-1", "access_token": "FRESH"}}
+    _write(store._auth_backup_path("1"), old)  # stored (stale) target
+    data = store._sequence_data()
+    store._set_account_record(data, "1", "one", store._metadata(json.dumps(old)))
+    store._write_json(store.sequence_file, data)
+    _write(store.auth_path, fresh)  # live real auth.json = fresher acct-1 creds
+
+    store._adopt_active_real_file(store._sequence_data())
+
+    assert '"FRESH"' in store._auth_backup_path("1").read_text(encoding="utf-8")
+
+
+def test_adopt_active_real_file_rejects_unmanaged(temp_home: Path) -> None:
+    store = _codex_store()
+    store._setup_directories()
+    store._init_sequence_file()
+    _write(store.auth_path, _codex_auth("stranger"))
+
+    with pytest.raises(ConfigError, match="not a managed"):
+        store._adopt_active_real_file(store._sequence_data())
+
+
+def test_adopt_active_real_file_noop_when_symlink(temp_home: Path) -> None:
+    store = _codex_store()
+    store._setup_directories()
+    target = store._auth_backup_path("1")
+    _write(target, _codex_auth("acct-1"))
+    store._activate_auth_symlink(target)
+
+    store._adopt_active_real_file(store._sequence_data())  # must not raise
