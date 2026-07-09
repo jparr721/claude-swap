@@ -51,6 +51,39 @@ class _StubSwitcher:
     def purge(self) -> None:
         self.calls.append(("purge", {}))
 
+    def status(self, json_output: bool = False) -> dict | None:
+        self.calls.append(("status", {"json_output": json_output}))
+        return {"schemaVersion": 1, "active": None} if json_output else None
+
+    def add_account(self, slot: int | None = None, assume_yes: bool = False) -> None:
+        self.calls.append(("add_account", {"slot": slot}))
+
+    def add_account_from_token(
+        self,
+        token: str,
+        email: str | None = None,
+        slot: int | None = None,
+        assume_yes: bool = False,
+    ) -> None:
+        self.calls.append(
+            ("add_account_from_token", {"token": token, "email": email, "slot": slot})
+        )
+
+    def switch(self, strategy: str | None = None, json_output: bool = False) -> dict | None:
+        self.calls.append(("switch", {"strategy": strategy, "json_output": json_output}))
+        return {"schemaVersion": 1, "switched": True} if json_output else None
+
+    def switch_to(
+        self, identifier: str, json_output: bool = False, force: bool = False
+    ) -> dict | None:
+        self.calls.append(
+            ("switch_to", {"identifier": identifier, "json_output": json_output, "force": force})
+        )
+        return {"schemaVersion": 1, "switched": True} if json_output else None
+
+    def remove_account(self, identifier: str, assume_yes: bool = False) -> None:
+        self.calls.append(("remove_account", {"identifier": identifier}))
+
 
 @pytest.fixture
 def stub_switcher(monkeypatch: pytest.MonkeyPatch) -> type[_StubSwitcher]:
@@ -181,3 +214,157 @@ def test_post_verb_json_flag_still_works(
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["key"] == "autoswitch.threshold"
+
+
+def _last_call(stub: type[_StubSwitcher]) -> tuple[str, dict[str, object]]:
+    assert stub.last is not None and stub.last.calls
+    return stub.last.calls[-1]
+
+
+def test_claude_list_is_claude_only(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["claude", "default", "list", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["schemaVersion"] == 1  # NOT the aggregate v2 envelope
+    assert _last_call(stub_switcher) == (
+        "list_accounts",
+        {"show_token_status": False, "json_output": True},
+    )
+
+
+def test_claude_list_token_status_conflicts_with_json(
+    stub_switcher: type[_StubSwitcher],
+) -> None:
+    result = runner.invoke(
+        app, ["claude", "default", "list", "--json", "--token-status"]
+    )
+    assert result.exit_code == 2
+
+
+def test_claude_status(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["claude", "default", "status"])
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == ("status", {"json_output": False})
+
+
+def test_claude_add_with_slot(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["claude", "default", "add", "--slot", "3"])
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == ("add_account", {"slot": 3})
+
+
+def test_claude_add_token(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(
+        app,
+        ["claude", "default", "add-token", "sk-tok", "--email", "me@x.com", "--slot", "2"],
+    )
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == (
+        "add_account_from_token",
+        {"token": "sk-tok", "email": "me@x.com", "slot": 2},
+    )
+
+
+def test_claude_bare_switch_rotates(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["claude", "default", "switch"])
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == (
+        "switch",
+        {"strategy": None, "json_output": False},
+    )
+
+
+def test_claude_switch_with_strategy(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["claude", "default", "switch", "--strategy", "best"])
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == (
+        "switch",
+        {"strategy": "best", "json_output": False},
+    )
+
+
+def test_claude_switch_rejects_unknown_strategy(
+    stub_switcher: type[_StubSwitcher],
+) -> None:
+    result = runner.invoke(app, ["claude", "default", "switch", "--strategy", "bogus"])
+    assert result.exit_code == 2  # enum choices enforced at the CLI boundary
+
+
+def test_claude_switch_positional_target(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["claude", "default", "switch", "2"])
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == (
+        "switch_to",
+        {"identifier": "2", "json_output": False, "force": False},
+    )
+
+
+def test_claude_switch_to_flag_and_force(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(
+        app, ["claude", "default", "switch", "--to", "me@x.com", "--force"]
+    )
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == (
+        "switch_to",
+        {"identifier": "me@x.com", "json_output": False, "force": True},
+    )
+
+
+def test_claude_switch_rejects_both_positional_and_to(
+    stub_switcher: type[_StubSwitcher],
+) -> None:
+    assert runner.invoke(app, ["claude", "default", "switch", "2", "--to", "3"]).exit_code == 2
+
+
+def test_claude_switch_strategy_conflicts_with_target(
+    stub_switcher: type[_StubSwitcher],
+) -> None:
+    result = runner.invoke(
+        app, ["claude", "default", "switch", "2", "--strategy", "best"]
+    )
+    assert result.exit_code == 2
+
+
+def test_claude_remove(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["claude", "default", "remove", "2"])
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == ("remove_account", {"identifier": "2"})
+
+
+def test_claude_export_and_import(
+    stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded: dict[str, object] = {}
+
+    def fake_export(switcher, destination, account=None, full=False):
+        recorded["export"] = (destination, account, full)
+
+    def fake_import(switcher, source, force=False):
+        recorded["import"] = (source, force)
+
+    monkeypatch.setattr("claude_swap.transfer.export_accounts", fake_export)
+    monkeypatch.setattr("claude_swap.transfer.import_accounts", fake_import)
+
+    assert runner.invoke(
+        app, ["claude", "default", "export", "out.json", "--account", "2", "--full"]
+    ).exit_code == 0
+    assert recorded["export"] == ("out.json", "2", True)
+
+    assert runner.invoke(
+        app, ["claude", "default", "import", "in.json", "--force"]
+    ).exit_code == 0
+    assert recorded["import"] == ("in.json", True)
+
+
+def test_claude_json_error_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    from claude_swap.exceptions import ConfigError
+
+    class _BrokenSwitcher(_StubSwitcher):
+        def status(self, json_output: bool = False) -> dict | None:
+            raise ConfigError("boom")
+
+    monkeypatch.setattr("claude_swap.cli.ClaudeAccountSwitcher", _BrokenSwitcher)
+    result = runner.invoke(app, ["claude", "default", "status", "--json"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["error"]["message"] == "boom"

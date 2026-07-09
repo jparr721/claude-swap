@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from collections.abc import Callable
+from enum import Enum
 
 import typer
 
@@ -362,6 +363,192 @@ def config_path(
         print(settings_path(_init_switcher(debug).backup_dir))
 
     _dispatch(action, json_mode=False, update_check=False)
+
+
+claude_app = typer.Typer(no_args_is_help=True, help="Claude Code frontend")
+claude_default_app = typer.Typer(
+    no_args_is_help=True, help="Claude Code accounts (default backend)"
+)
+app.add_typer(claude_app, name="claude")
+claude_app.add_typer(claude_default_app, name="default")
+
+
+class SwitchStrategy(str, Enum):
+    best = "best"
+    next_available = "next-available"
+
+
+@claude_default_app.command("list")
+def claude_list(
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON to stdout"
+    ),
+    token_status: bool = typer.Option(
+        False, "--token-status", help="Show OAuth token expiry state"
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """List managed Claude accounts."""
+    if json_output and token_status:
+        # Token status is not part of the JSON v1 schema; reject rather than
+        # silently ignore it (a future additive field can add it).
+        raise typer.BadParameter("--token-status cannot be combined with --json")
+    _dispatch(
+        lambda: _init_switcher(debug).list_accounts(
+            show_token_status=token_status, json_output=json_output
+        ),
+        json_mode=json_output,
+        update_check=True,
+    )
+
+
+@claude_default_app.command("status")
+def claude_status(
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON to stdout"
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Show the current Claude account."""
+    _dispatch(
+        lambda: _init_switcher(debug).status(json_output=json_output),
+        json_mode=json_output,
+        update_check=True,
+    )
+
+
+@claude_default_app.command("add")
+def claude_add(
+    slot: int | None = typer.Option(
+        None, "--slot", metavar="NUM", help="Store in a specific slot"
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Add the currently logged-in Claude account."""
+    _dispatch(
+        lambda: _init_switcher(debug).add_account(slot=slot),
+        json_mode=False,
+        update_check=True,
+    )
+
+
+@claude_default_app.command("add-token")
+def claude_add_token(
+    token: str = typer.Argument(
+        "", metavar="[TOKEN|-]", help="Setup token or API key ('-' or empty reads stdin/prompt)"
+    ),
+    email: str | None = typer.Option(
+        None,
+        "--email",
+        metavar="EMAIL",
+        help="Email for the account (defaults to a token.local placeholder)",
+    ),
+    slot: int | None = typer.Option(
+        None, "--slot", metavar="NUM", help="Store in a specific slot"
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Register a setup-token or API key as a managed account."""
+    _dispatch(
+        lambda: _init_switcher(debug).add_account_from_token(
+            token=token, email=email, slot=slot
+        ),
+        json_mode=False,
+        update_check=True,
+    )
+
+
+@claude_default_app.command("switch")
+def claude_switch(
+    target: str | None = typer.Argument(None, metavar="[NUM|EMAIL]"),
+    to: str | None = typer.Option(None, "--to", metavar="NUM|EMAIL", help="Switch target"),
+    strategy: SwitchStrategy | None = typer.Option(
+        None,
+        "--strategy",
+        help=(
+            "With bare switch: 'best' jumps to the account with the most "
+            "quota headroom; 'next-available' rotates, skipping exhausted accounts"
+        ),
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Activate the stored credentials without backing up the current login first",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON to stdout"
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Rotate to the next Claude account, or switch to a specific one."""
+    if target is not None and to is not None:
+        raise typer.BadParameter("give either a positional target or --to, not both")
+    resolved = target if target is not None else to
+    if strategy is not None and resolved is not None:
+        raise typer.BadParameter("--strategy can only be used with bare 'switch'")
+    if force and resolved is None:
+        raise typer.BadParameter("--force requires a target")
+
+    def action() -> dict | None:
+        switcher = _init_switcher(debug)
+        if resolved is None:
+            return switcher.switch(
+                strategy=strategy.value if strategy is not None else None,
+                json_output=json_output,
+            )
+        return switcher.switch_to(resolved, json_output=json_output, force=force)
+
+    _dispatch(action, json_mode=json_output, update_check=True)
+
+
+@claude_default_app.command("remove")
+def claude_remove(
+    identifier: str = typer.Argument(..., metavar="NUM|EMAIL"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Remove a managed Claude account."""
+    _dispatch(
+        lambda: _init_switcher(debug).remove_account(identifier),
+        json_mode=False,
+        update_check=True,
+    )
+
+
+@claude_default_app.command("export")
+def claude_export(
+    destination: str = typer.Argument(..., metavar="PATH|-"),
+    account: str | None = typer.Option(
+        None, "--account", metavar="NUM|EMAIL", help="Limit export to one account"
+    ),
+    full: bool = typer.Option(
+        False, "--full", help="Include full ~/.claude.json (default: oauthAccount only)"
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Export managed accounts to a JSON file (or '-' for stdout)."""
+
+    def action() -> None:
+        from claude_swap.transfer import export_accounts
+
+        export_accounts(_init_switcher(debug), destination, account=account, full=full)
+
+    _dispatch(action, json_mode=False, update_check=True)
+
+
+@claude_default_app.command("import")
+def claude_import(
+    source: str = typer.Argument(..., metavar="PATH|-"),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing accounts"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Import accounts from a JSON file (or '-' for stdin)."""
+
+    def action() -> None:
+        from claude_swap.transfer import import_accounts
+
+        import_accounts(_init_switcher(debug), source, force=force)
+
+    _dispatch(action, json_mode=False, update_check=True)
 
 
 def _prog_name() -> str:
