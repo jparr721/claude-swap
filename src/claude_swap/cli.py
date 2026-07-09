@@ -8,7 +8,7 @@ import os
 import sys
 
 from claude_swap import __version__
-from claude_swap.exceptions import ClaudeSwitchError, ConfigError
+from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import error_envelope, provider_envelope
 from claude_swap.printer import dimmed, error, force_utf8_output, muted
 from claude_swap.providers.registry import get_provider, managed_aggregate_providers

@@ -400,3 +400,25 @@ def test_codex_add_restores_symlink_when_login_fails(temp_home: Path, monkeypatc
     # prior account-1 symlink restored; not left dangling on account-2
     assert store.auth_path.is_symlink()
     assert store.auth_path.resolve() == store._auth_backup_path("1").resolve()
+
+
+def test_first_switch_adopts_live_real_file_and_symlinks(temp_home: Path) -> None:
+    # Pre-change world: accounts 1 & 2 registered with byte-snapshot targets, and
+    # ~/.codex/auth.json is a REAL file = freshest account-1 creds.
+    store = _codex_store()
+    store._setup_directories()
+    store._init_sequence_file()
+    data = store._sequence_data()
+    for num, acct in (("1", "acct-1"), ("2", "acct-2")):
+        _write(store._auth_backup_path(num), _codex_auth(acct))
+        store._set_account_record(data, num, f"a{num}", store._metadata(json.dumps(_codex_auth(acct))))
+    store._write_json(store.sequence_file, data)
+    fresh_one = {"auth_mode": "chatgpt", "tokens": {"account_id": "acct-1", "access_token": "FRESH"}}
+    _write(store.auth_path, fresh_one)  # real file, not yet a symlink
+
+    store.switch("2", json_output=False)
+
+    # account-1 preserved from the live file, active now symlinked to account-2
+    assert '"FRESH"' in store._auth_backup_path("1").read_text(encoding="utf-8")
+    assert store.auth_path.is_symlink()
+    assert store.auth_path.resolve() == store._auth_backup_path("2").resolve()
