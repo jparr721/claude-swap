@@ -174,7 +174,7 @@ def error_envelope(exc: Exception) -> dict:
 
 
 def provider_envelope(providers: dict[str, dict[str, dict]]) -> dict:
-    """The schema-v2 aggregate provider envelope for `cswap list --json`."""
+    """The schema-v2 aggregate provider envelope for `cswap ls --json`."""
     return {
         "schemaVersion": SCHEMA_VERSION_V2,
         "providers": providers,

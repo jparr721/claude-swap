@@ -798,7 +798,8 @@ class ClaudeAccountSwitcher:
         if looks_like_api_key(creds):
             raise ValidationError(
                 "Active login is an API-key account. Add it with "
-                "'cswap --add-token sk-ant-api...' instead of --add-account."
+                "'cswap claude default add-token sk-ant-api...' instead of "
+                "'cswap claude default add'."
             )
 
     def _reject_cross_kind_collision(self, email: str, is_api_key: bool) -> None:
@@ -863,7 +864,7 @@ class ClaudeAccountSwitcher:
         )
         raise ConfigError(
             f"Email '{identifier}' is ambiguous — matches accounts: {details}. "
-            f"Use account number instead (e.g., cswap --switch-to 1)."
+            f"Use account number instead (e.g., cswap claude default switch --to 1)."
         )
 
     def _get_sequence_data_migrated(self) -> dict | None:
@@ -1771,7 +1772,7 @@ class ClaudeAccountSwitcher:
         against the current one and only recommends a switch it can *prove*
         lands on strictly more headroom — never onto an account worse than (or
         merely unverifiable against) where the user already is. When a switch
-        can't be proven beneficial, it stays put; bare ``cswap --switch``
+        can't be proven beneficial, it stays put; bare ``cswap claude default switch``
         remains the way to force a plain rotation. Returns ``(target, note)``:
 
         - ``(num, "")`` — switch to ``num`` (strictly more headroom than current)
@@ -2047,7 +2048,7 @@ class ClaudeAccountSwitcher:
             f"({current_email}) to managed list? [Y/n] "
         )
         if response.lower() == "n":
-            print(dimmed("Setup cancelled. You can run 'cswap --add-account' later."))
+            print(dimmed("Setup cancelled. You can run 'cswap claude default add' later."))
             return
 
         self.add_account()
@@ -2125,7 +2126,7 @@ class ClaudeAccountSwitcher:
 
         ``"best"`` only switches when it can prove another account has more
         remaining quota; if usage can't be fetched or no candidate is provably
-        better, it stays put (run a plain ``cswap --switch`` to rotate anyway).
+        better, it stays put (run a plain ``cswap claude default switch`` to rotate anyway).
         ``"next-available"`` rotates and skips accounts at their limit, falling
         back to plain rotation when usage is unavailable. Both apply only to the
         normal path (a live Claude login present); the fresh-machine path (no
@@ -2143,7 +2144,7 @@ class ClaudeAccountSwitcher:
         self._get_sequence_data_migrated()
 
         # Fresh-machine path: no live Claude session, but we have managed accounts
-        # (e.g. right after cswap --import). Activate the recorded
+        # (e.g. right after cswap claude default import). Activate the recorded
         # activeAccountNumber, or fall back to the first slot in sequence.
         # With no live state to capture, the target must have valid backups —
         # walk the sequence if the preferred target is broken.
@@ -2166,7 +2167,7 @@ class ClaudeAccountSwitcher:
                     print(
                         f"{accent('Skipping')} Account-{target} "
                         f"(no stored credentials/config, re-add with "
-                        f"cswap --add-account --slot {target})"
+                        f"cswap claude default add --slot {target})"
                     )
                 fallback = next(
                     (str(num) for num in sequence
@@ -2176,7 +2177,7 @@ class ClaudeAccountSwitcher:
                 if not fallback:
                     raise ConfigError(
                         "No managed accounts have valid stored credentials/config. "
-                        "Re-add a slot with: cswap --add-account --slot <number>"
+                        "Re-add a slot with: cswap claude default add --slot <number>"
                     )
                 target = fallback
             op = self._perform_switch(target, emit_output=not json_output)
@@ -2198,7 +2199,7 @@ class ClaudeAccountSwitcher:
                     reason="unmanaged-account",
                     from_ref=ref,
                     to_ref=ref,
-                    message="Active account is not managed; run cswap --add-account",
+                    message="Active account is not managed; run cswap claude default add",
                 )
             print(f"{accent('Notice:')} Active account '{current_email}' was not managed.")
             self.add_account()
@@ -2237,7 +2238,7 @@ class ClaudeAccountSwitcher:
 
         # Usage-aware "jump to most headroom". Only switches when another
         # account is provably better; otherwise stays put (never moves onto a
-        # worse or unverifiable account). Bare `cswap --switch` rotates anyway.
+        # worse or unverifiable account). Bare `cswap claude default switch` rotates anyway.
         if strategy == "best":
             target, note = self._select_best_switchable(current_num)
             if target is not None:
@@ -2258,7 +2259,7 @@ class ClaudeAccountSwitcher:
                     )
                 print(dimmed(
                     f"Current account usage is unavailable — staying on "
-                    f"Account-{current_num}. Run cswap --switch to rotate."
+                    f"Account-{current_num}. Run cswap claude default switch to rotate."
                 ))
                 return None
             if note == "no-comparison":
@@ -2273,7 +2274,7 @@ class ClaudeAccountSwitcher:
                     )
                 print(dimmed(
                     f"No other account has usage data to compare — staying on "
-                    f"Account-{current_num}. Run cswap --switch to rotate."
+                    f"Account-{current_num}. Run cswap claude default switch to rotate."
                 ))
                 return None
             if note == "incomplete-comparison":
@@ -2358,7 +2359,7 @@ class ClaudeAccountSwitcher:
                     print(
                         f"{accent('Skipping')} Account-{candidate} "
                         f"(no stored credentials/config, re-add with "
-                        f"cswap --add-account --slot {candidate})"
+                        f"cswap claude default add --slot {candidate})"
                     )
                 continue
             if strategy == "next-available":
@@ -2402,7 +2403,7 @@ class ClaudeAccountSwitcher:
                 )
             print(dimmed(
                 "No other accounts have valid stored credentials/config.\n"
-                "Re-add a skipped slot with: cswap --add-account --slot <number>"
+                "Re-add a skipped slot with: cswap claude default add --slot <number>"
             ))
             return None
 
@@ -2491,7 +2492,7 @@ class ClaudeAccountSwitcher:
                         print(dimmed(
                             "To rewrite the live login from the stored backup "
                             "(e.g. after --import), run: "
-                            f"cswap --switch-to {target_account} --force"
+                            f"cswap claude default switch --to {target_account} --force"
                         ))
                         return None
                     return self._switch_noop(
@@ -2559,7 +2560,7 @@ class ClaudeAccountSwitcher:
                     "same account as both the default login and a session can make "
                     "one copy's token go stale if the server rotates it. If the "
                     "session later fails to authenticate, exit it and re-run "
-                    f"'cswap run {target_account}'."
+                    f"'cswap claude default run {target_account}'."
                 )
                 if emit_output:
                     warning(msg)
@@ -2614,12 +2615,12 @@ class ClaudeAccountSwitcher:
                 if not target_creds:
                     raise SwitchError(
                         f"Account-{target_account} has no stored credentials. "
-                        f"Re-add with: cswap --add-account --slot {target_account}"
+                        f"Re-add with: cswap claude default add --slot {target_account}"
                     )
                 if not target_config:
                     raise SwitchError(
                         f"Account-{target_account} has no stored config backup. "
-                        f"Re-add with: cswap --add-account --slot {target_account}"
+                        f"Re-add with: cswap claude default add --slot {target_account}"
                     )
                 try:
                     target_config_data = json.loads(target_config)
@@ -2764,12 +2765,12 @@ class ClaudeAccountSwitcher:
                 if not target_creds:
                     raise SwitchError(
                         f"Account-{target_account} has no stored credentials. "
-                        f"Re-add with: cswap --add-account --slot {target_account}"
+                        f"Re-add with: cswap claude default add --slot {target_account}"
                     )
                 if not target_config:
                     raise SwitchError(
                         f"Account-{target_account} has no stored config backup. "
-                        f"Re-add with: cswap --add-account --slot {target_account}"
+                        f"Re-add with: cswap claude default add --slot {target_account}"
                     )
 
                 # Step 3: Activate target account - credentials
@@ -2828,7 +2829,7 @@ class ClaudeAccountSwitcher:
                 self.list_accounts()
             except Exception as e:
                 self._logger.warning(f"Post-switch usage display failed: {e!r}")
-                print(dimmed("  (usage display unavailable — run `cswap --list` to retry)"))
+                print(dimmed("  (usage display unavailable — run `cswap claude default list` to retry)"))
             print()
             self._print_switch_followup()
             print()
@@ -2894,7 +2895,7 @@ class ClaudeAccountSwitcher:
             )
             raise SessionError(
                 f"Live session-mode Claude instance(s) found: {details}. "
-                "Exit them first, then retry --purge."
+                "Exit them first, then retry 'cswap purge'."
             )
 
         warning("This will remove ALL claude-swap data from your system:")

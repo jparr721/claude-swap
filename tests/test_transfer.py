@@ -288,7 +288,7 @@ class TestConflictPolicy:
 
         err = capsys.readouterr().err
         assert "alice@example.com is your current live login" in err
-        assert "cswap --switch-to 1 --force" in err
+        assert "cswap claude default switch --to 1 --force" in err
 
     def test_import_without_matching_live_login_prints_no_hint(
         self, temp_home: Path, capsys
@@ -1184,7 +1184,7 @@ class TestExportSkipsBrokenSlots:
     def test_stdout_pipe_mode_keeps_stdout_pure_json(
         self, temp_home: Path, capsys
     ):
-        """cswap --export - must produce valid JSON on stdout even when one
+        """cswap claude default export - must produce valid JSON on stdout even when one
         slot is broken — warning must go to stderr."""
         s = _linux_switcher(temp_home)
         _seed_account(s, 1, "alice@example.com")

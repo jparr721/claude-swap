@@ -1,6 +1,6 @@
 """Auto-switch engine: poll usage, switch accounts before they hit rate limits.
 
-``AutoSwitchEngine`` is UI-agnostic — no printing, no argparse imports. It
+``AutoSwitchEngine`` is UI-agnostic - no printing, no CLI imports. It
 composes a :class:`ClaudeAccountSwitcher`, evaluates a threshold policy each
 :meth:`~AutoSwitchEngine.tick`, and reports everything through typed events
 handed to an ``on_event`` callback; the CLI renders them as human lines or
@@ -241,7 +241,7 @@ class QuarantineEvent(AutoSwitchEvent):
     def human(self) -> str:
         return (
             f"Account-{self.number} ({self.email}) quarantined: {self.reason}. "
-            f"Log in with it and run 'cswap --add-account --slot {self.number}' "
+            f"Log in with it and run 'cswap claude default add --slot {self.number}' "
             "to recover."
         )
 
@@ -581,14 +581,14 @@ class AutoSwitchEngine:
                 self._emit(
                     NoSwitchEvent(
                         reason="unmanaged-active-account",
-                        detail="run 'cswap --add-account' to include it in rotation",
+                        detail="run 'cswap claude default add' to include it in rotation",
                     )
                 )
             else:
                 self._emit(
                     NoSwitchEvent(
                         reason="no-active-account",
-                        detail="log in and run 'cswap --add-account' first",
+                        detail="log in and run 'cswap claude default add' first",
                     )
                 )
             return TickOutcome.NO_ACTION

@@ -340,7 +340,7 @@ def effective_settings(backup_root: Path) -> list[tuple[SettingSpec, object, boo
 
 
 def merged_with_cli(settings: AutoSwitchSettings, args) -> AutoSwitchSettings:
-    """Overlay non-None CLI overrides (argparse Namespace) onto settings."""
+    """Overlay non-None CLI overrides (a SimpleNamespace of CLI flags) onto settings."""
     overrides = {}
     for attr, field in (
         ("threshold", "threshold"),
