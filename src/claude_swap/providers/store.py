@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -264,6 +265,36 @@ class ProviderAccountStore:
 
     def _write_active_auth(self, text: str) -> None:
         _atomic_write_text(self.auth_path, text)
+
+    def _activate_auth_symlink(self, target_file: Path) -> None:
+        """Atomically point the active auth file at ``target_file`` (a symlink).
+
+        Codex writes auth.json in place (open+truncate+write, no rename), so a
+        symlink here is followed and written through to ``target_file`` - the
+        per-account credential rotates in that file and is never overwritten by
+        a stale copy. Replaces either a pre-existing real file or an older
+        symlink atomically via ``os.replace`` of a sibling temp symlink.
+        """
+        self.auth_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.auth_path.with_name(f".{self.auth_path.name}.{os.getpid()}.tmp")
+        try:
+            if tmp.is_symlink() or tmp.exists():
+                tmp.unlink()
+            os.symlink(os.fspath(target_file), os.fspath(tmp))
+            os.replace(os.fspath(tmp), os.fspath(self.auth_path))
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise ConfigError(
+                f"Failed to point {self.definition.display_name} active auth at "
+                f"{target_file}: {exc}"
+            ) from exc
+
+    def _active_symlink_target(self) -> Path | None:
+        """Absolute target of the active auth symlink, or None if not a symlink."""
+        if not self.auth_path.is_symlink():
+            return None
+        return Path(os.path.realpath(self.auth_path))
 
     def _read_account_auth(self, account_num: str) -> str:
         try:

@@ -198,3 +198,45 @@ def test_openai_switch_refuses_before_stored_auth_lookup(temp_home: Path) -> Non
 
     with pytest.raises(ConfigError, match="cannot safely restore stored OpenAI OAuth"):
         store.switch("1", json_output=False)
+
+
+def test_activate_auth_symlink_points_active_at_target(temp_home: Path) -> None:
+    store = _codex_store()
+    store._setup_directories()
+    target = store._auth_backup_path("1")
+    _write(target, _codex_auth("acct-1"))
+
+    store._activate_auth_symlink(target)
+
+    assert store.auth_path.is_symlink()
+    assert store.auth_path.resolve() == target.resolve()
+    assert store._active_symlink_target().resolve() == target.resolve()
+
+
+def test_activate_auth_symlink_replaces_existing_real_file(temp_home: Path) -> None:
+    store = _codex_store()
+    store._setup_directories()
+    _write(store.auth_path, _codex_auth("real-live"))  # a real file, not a symlink
+    target = store._auth_backup_path("2")
+    _write(target, _codex_auth("acct-2"))
+
+    store._activate_auth_symlink(target)
+
+    assert store.auth_path.is_symlink()
+    assert store.auth_path.resolve() == target.resolve()
+
+
+def test_codex_writethrough_symlink_updates_target(temp_home: Path) -> None:
+    # Core invariant: writing to auth.json (as Codex does, in place) lands on the
+    # per-account target file, so rotation stays in the account file.
+    store = _codex_store()
+    store._setup_directories()
+    target = store._auth_backup_path("1")
+    _write(target, _codex_auth("acct-1"))
+    store._activate_auth_symlink(target)
+
+    rotated = {"auth_mode": "chatgpt", "tokens": {"account_id": "acct-1", "access_token": "ROTATED"}}
+    store.auth_path.write_text(json.dumps(rotated), encoding="utf-8")  # simulate Codex refresh
+
+    assert store.auth_path.is_symlink()  # write followed the symlink; it stays a symlink
+    assert '"ROTATED"' in target.read_text(encoding="utf-8")
