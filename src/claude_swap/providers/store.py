@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ from claude_swap import oauth
 from claude_swap.exceptions import AccountNotFoundError, ConfigError, LockError, ValidationError
 from claude_swap.locking import FileLock
 from claude_swap.models import get_timestamp
-from claude_swap.json_output import SCHEMA_VERSION, usage_freshness_fields
+from claude_swap.json_output import SCHEMA_VERSION, USAGE_RELOGIN_REQUIRED, usage_freshness_fields
 from claude_swap.printer import accent, bolded, dimmed, format_age, muted
 from claude_swap.providers.openai import OPENAI_USAGE_TIMEOUT_S
 from claude_swap.providers.types import (
@@ -156,6 +157,8 @@ def _usage_fields(entry: UsageEntry) -> tuple[str, dict[str, Any] | None]:
     usage = entry.decision_value()
     if isinstance(usage, dict):
         return "ok", _usage_to_json(usage)
+    if usage == USAGE_RELOGIN_REQUIRED:
+        return "relogin_required", None
     return "unavailable", None
 
 
@@ -572,6 +575,7 @@ class ProviderAccountStore:
             if not entries[account_num].fresh(now)
             and not entries[account_num].in_backoff(now)
             and not entries[account_num].claimed(now)
+            and not entries[account_num].token_dead()
         ]
         if to_fetch:
             active_num = self._current_account_number(data, None)
@@ -584,7 +588,18 @@ class ProviderAccountStore:
                 identities,
             )
             entries = store.entries(identities)
-        return entries
+        # Dead-token quarantine surfaces as a sentinel overlay (never persisted),
+        # mirroring the Claude collector. Recovery is automatic: re-adding the
+        # account rewrites its record fingerprint, which changes the usage-store
+        # identity and yields a fresh, strike-free entry.
+        return {
+            account_num: (
+                replace(entry, sentinel=USAGE_RELOGIN_REQUIRED)
+                if entry.token_dead()
+                else entry
+            )
+            for account_num, entry in entries.items()
+        }
 
     def _provider_payload(self) -> dict[str, str]:
         return {
@@ -621,6 +636,14 @@ class ProviderAccountStore:
         }
 
     def _usage_lines(self, entry: UsageEntry) -> list[str]:
+        if entry.sentinel == USAGE_RELOGIN_REQUIRED:
+            ref = self.definition.ref
+            return [
+                dimmed(
+                    "re-login needed - refresh token dead; re-add with: "
+                    f"cswap {ref.frontend} {ref.backend} add"
+                )
+            ]
         if entry.last_good is not None:
             lines = _usage_to_lines(entry.last_good)
             if (

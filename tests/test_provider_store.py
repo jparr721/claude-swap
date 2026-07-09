@@ -747,3 +747,62 @@ def test_opencode_accounts_never_hit_the_refresh_path(
     store.list_accounts(json_output=True)
 
     assert len(fetch_calls) == 1  # fetched as today, no refresh interference
+
+
+def test_invalid_grant_quarantines_account_and_reports_relogin(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seeded_codex_store(
+        {"1": _codex_oauth_auth("acct-1", _FRESH), "2": _codex_oauth_auth("acct-2", _EXPIRED)},
+        active="1",
+    )
+    refresh_calls: list[str] = []
+
+    def fake_refresh(auth_text: str, timeout_s: float) -> RefreshResult:
+        refresh_calls.append(auth_text)
+        return RefreshResult(None, "invalid_grant")
+
+    fetched: list[str] = []
+
+    def fake_fetch(auth_text: str, timeout_s: float) -> dict[str, object]:
+        fetched.append(json.loads(auth_text)["tokens"]["account_id"])
+        return {"windows": []}
+
+    monkeypatch.setattr(store.definition.backend, "refresh_auth", fake_refresh)
+    monkeypatch.setattr(store.definition.backend, "fetch_usage", fake_fetch)
+
+    payload = store.list_accounts(json_output=True)
+    rows = {row["number"]: row for row in payload["accounts"]}
+    assert rows[2]["usageStatus"] == "relogin_required"
+    assert "acct-2" not in fetched  # the dead account's usage was never fetched
+
+    # A second pass must not retry the dead refresh token (quarantine).
+    payload = store.list_accounts(json_output=True)
+    assert len(refresh_calls) == 1
+    rows = {row["number"]: row for row in payload["accounts"]}
+    assert rows[2]["usageStatus"] == "relogin_required"
+
+
+def test_relogin_needed_appears_in_human_output(
+    temp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store = _seeded_codex_store(
+        {"1": _codex_oauth_auth("acct-1", _FRESH), "2": _codex_oauth_auth("acct-2", _EXPIRED)},
+        active="1",
+    )
+    monkeypatch.setattr(
+        store.definition.backend,
+        "refresh_auth",
+        lambda auth_text, timeout_s: RefreshResult(None, "invalid_grant"),
+    )
+    monkeypatch.setattr(
+        store.definition.backend, "fetch_usage", lambda auth_text, timeout_s: {"windows": []}
+    )
+
+    store.list_accounts(json_output=False)
+
+    out = capsys.readouterr().out
+    assert "re-login needed" in out
+    assert "cswap codex openai add" in out
