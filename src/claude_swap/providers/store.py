@@ -621,6 +621,11 @@ class ProviderAccountStore:
                 prior_num = self._current_account_number(data, active_text)
                 if prior_num is not None:
                     self._write_account_auth(prior_num, active_text)
+            # Clear the active auth before login. `codex login` runs a pre-login
+            # logout_with_revoke that would revoke the currently-active account
+            # server-side; with auth.json absent it has no token to revoke. The
+            # outgoing account keeps its still-valid tokens in its own file.
+            self.auth_path.unlink(missing_ok=True)
 
         try:
             self._run_headless_login()

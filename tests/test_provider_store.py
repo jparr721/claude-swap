@@ -406,6 +406,35 @@ def test_codex_add_relogin_by_identity_updates_existing_slot(
     assert '"FRESH2"' in store._auth_backup_path("2").read_text(encoding="utf-8")
 
 
+def test_codex_add_clears_active_auth_before_login_to_avoid_revoke(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `codex login` revokes whatever is in auth.json before logging in the new
+    # account. Adding an account must clear auth.json first so the outgoing
+    # account is never revoked (its creds are preserved in its own file).
+    store = _codex_store()
+    store._setup_directories()
+    store._init_sequence_file()
+    data = store._sequence_data()
+    _write(store._auth_backup_path("1"), _codex_auth("AAA"))
+    store._set_account_record(data, "1", "work", store._metadata(json.dumps(_codex_auth("AAA"))))
+    store._write_json(store.sequence_file, data)
+    store._activate_auth_symlink(store._auth_backup_path("1"))  # account-1 is active
+
+    seen: dict[str, bool] = {}
+
+    def fake_login() -> None:
+        seen["auth_live_at_login"] = store.auth_path.exists() or store.auth_path.is_symlink()
+        _fake_codex_login(store, _codex_auth("BBB"))
+
+    monkeypatch.setattr(store, "_run_headless_login", fake_login)
+
+    store.add_account(label="personal", slot=2)
+
+    assert seen["auth_live_at_login"] is False  # cleared before login => codex revokes nothing
+    assert '"AAA"' in store._auth_backup_path("1").read_text(encoding="utf-8")  # outgoing preserved
+
+
 def test_codex_add_preserves_prior_managed_login(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = _codex_store()
     store._setup_directories()
