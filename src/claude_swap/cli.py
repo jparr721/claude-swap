@@ -8,6 +8,7 @@ import os
 import sys
 from collections.abc import Callable
 from enum import Enum
+from types import SimpleNamespace
 
 import typer
 
@@ -549,6 +550,151 @@ def claude_import(
         import_accounts(_init_switcher(debug), source, force=force)
 
     _dispatch(action, json_mode=False, update_check=True)
+
+
+@claude_default_app.command("run")
+def claude_run(
+    account: str = typer.Argument(..., metavar="NUM|EMAIL", help="Account to run"),
+    claude_args: list[str] | None = typer.Argument(
+        None,
+        metavar="[-- CLAUDE_ARGS...]",
+        help="Everything after '--' is forwarded to claude verbatim",
+    ),
+    no_share: bool = typer.Option(
+        False,
+        "--no-share",
+        help=(
+            "Don't share settings/keybindings/CLAUDE.md/skills/commands/agents "
+            "from ~/.claude into the session profile"
+        ),
+    ),
+    share_history: bool = typer.Option(
+        False,
+        "--share-history/--no-share-history",
+        help=(
+            "Share conversation history from ~/.claude into the session "
+            "profile (not supported on Windows)"
+        ),
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """[EXPERIMENTAL] Launch Claude Code as a stored account, this terminal only.
+
+    On POSIX this execs claude and never returns.
+    """
+
+    def action() -> None:
+        switcher = _init_switcher(debug)
+        from claude_swap.session import SessionManager
+
+        SessionManager(switcher).run(
+            account,
+            list(claude_args or []),
+            share=not no_share,
+            share_history=share_history,
+        )
+
+    _dispatch(action, json_mode=False, update_check=False)
+
+
+@claude_default_app.command("auto")
+def claude_auto(
+    once: bool = typer.Option(
+        False, "--once", help="Evaluate once, maybe switch, and exit (exit code = outcome)"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit one machine-readable JSON event per line on stdout"
+    ),
+    interval: float | None = typer.Option(
+        None, "--interval", metavar="SECONDS", help="Poll interval in loop mode (min 15; default 60)"
+    ),
+    threshold: float | None = typer.Option(
+        None,
+        "--threshold",
+        metavar="PCT",
+        help="Switch when the binding 5h/7d window reaches this utilization (50-99.9; default 90)",
+    ),
+    cooldown: float | None = typer.Option(
+        None, "--cooldown", metavar="SECONDS", help="Minimum time between proactive switches (default 300)"
+    ),
+    include_api_key_accounts: bool | None = typer.Option(
+        None,
+        "--include-api-key-accounts/--no-include-api-key-accounts",
+        help="Allow switching onto managed API-key accounts as a last resort",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Evaluate and report, but never switch or write state"
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Auto-switch accounts when the active one nears its rate limit.
+
+    Exit codes with --once: 0 switched, 1 error, 2 no action needed,
+    3 blocked (no viable target / all accounts exhausted).
+    """
+    import signal
+    import time as _time
+
+    from claude_swap.autoswitch import AutoSwitchEngine, AutoSwitchEvent
+    from claude_swap.printer import accent, yellowed
+    from claude_swap.settings import load_settings, merged_with_cli
+
+    def jsonl_emit(event: AutoSwitchEvent) -> None:
+        print(json.dumps(event.to_json()), flush=True)
+
+    def human_emit(event: AutoSwitchEvent) -> None:
+        stamp = _time.strftime("%H:%M:%S")
+        line = event.human()
+        if event.kind == "switch":
+            line = accent(line)
+        elif event.kind in ("error", "account-quarantined"):
+            line = yellowed(line)
+        elif event.kind in ("poll", "no-switch", "sleep"):
+            line = dimmed(line)
+        print(f"{stamp}  {line}", flush=True)
+
+    try:
+        switcher = _init_switcher(debug)
+        overrides = SimpleNamespace(
+            threshold=threshold,
+            interval=interval,
+            cooldown=cooldown,
+            include_api_key_accounts=include_api_key_accounts,
+        )
+        settings = merged_with_cli(load_settings(switcher.backup_dir), overrides)
+        engine = AutoSwitchEngine(
+            switcher,
+            settings,
+            jsonl_emit if json_output else human_emit,
+            dry_run=dry_run,
+        )
+
+        if once:
+            raise typer.Exit(engine.tick().value)
+
+        # Loop mode: SIGTERM (systemd stop) exits the loop cleanly.
+        signal.signal(signal.SIGTERM, lambda *_: engine.stop())
+        if not json_output:
+            print(
+                dimmed(
+                    f"Auto-switch running: threshold {settings.threshold:.0f}%, "
+                    f"every {settings.interval_seconds:.0f}s"
+                    f"{' (dry-run)' if dry_run else ''} - Ctrl-C to stop"
+                )
+            )
+        raise typer.Exit(engine.run_loop())
+    except ClaudeSwitchError as e:
+        if json_output:
+            print(json.dumps(error_envelope(e)))
+        else:
+            error(f"Error: {e}")
+        raise typer.Exit(1) from e
+    except KeyboardInterrupt:
+        print(
+            f"\n{dimmed('Auto-switch stopped')}",
+            file=sys.stderr if json_output else sys.stdout,
+        )
+        raise typer.Exit(130) from None
 
 
 def _prog_name() -> str:

@@ -368,3 +368,63 @@ def test_claude_json_error_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
     assert payload["error"]["message"] == "boom"
+
+
+def test_run_forwards_args_after_double_dash(
+    stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded: dict[str, object] = {}
+
+    class _StubSession:
+        def __init__(self, switcher: object) -> None:
+            pass
+
+        def run(
+            self,
+            identifier: str,
+            claude_args: list[str],
+            share: bool = True,
+            share_history: bool = False,
+        ) -> None:
+            recorded["run"] = (identifier, claude_args, share, share_history)
+            raise SystemExit(0)
+
+    monkeypatch.setattr("claude_swap.session.SessionManager", _StubSession)
+    result = runner.invoke(
+        app,
+        ["claude", "default", "run", "2", "--no-share", "--", "--resume", "-p", "hi"],
+    )
+    assert result.exit_code == 0
+    assert recorded["run"] == ("2", ["--resume", "-p", "hi"], False, False)
+
+
+def test_run_rejects_unknown_options_before_double_dash(
+    stub_switcher: type[_StubSwitcher],
+) -> None:
+    result = runner.invoke(app, ["claude", "default", "run", "2", "--bogus-flag"])
+    assert result.exit_code == 2
+
+
+def test_auto_once_exit_code_reflects_tick_outcome(
+    stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import types
+
+    _StubSwitcher.backup_dir_override = tmp_path
+    captured: dict[str, object] = {}
+
+    class _StubEngine:
+        def __init__(self, switcher, settings, emit, dry_run=False) -> None:
+            captured["settings"] = settings
+            captured["dry_run"] = dry_run
+
+        def tick(self) -> object:
+            return types.SimpleNamespace(value=2)
+
+    monkeypatch.setattr("claude_swap.autoswitch.AutoSwitchEngine", _StubEngine)
+    result = runner.invoke(
+        app, ["claude", "default", "auto", "--once", "--threshold", "80", "--dry-run"]
+    )
+    assert result.exit_code == 2
+    assert captured["dry_run"] is True
+    assert captured["settings"].threshold == 80.0
