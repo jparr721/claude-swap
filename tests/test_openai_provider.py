@@ -2,19 +2,24 @@ from __future__ import annotations
 
 import base64
 import email.message
+import io
 import json
 import urllib.error
 from pathlib import Path
 
 import pytest
 
+from claude_swap.providers import openai as openai_module
 from claude_swap.providers.frontends import CodexFrontend, OpencodeFrontend
 from claude_swap.providers.openai import (
     ACCESS_TOKEN_EXPIRY_BUFFER_S,
+    CODEX_OAUTH_CLIENT_ID,
+    CODEX_REFRESH_TOKEN_URL,
     CodexOpenAIBackend,
     OpencodeOpenAIBackend,
     UsageFetchError,
 )
+from claude_swap.providers.types import RefreshResult
 
 
 def _codex_auth(account_id: str) -> dict[str, object]:
@@ -160,15 +165,6 @@ def test_opencode_access_token_never_expired() -> None:
     backend = OpencodeOpenAIBackend()
     text = json.dumps({"openai": {"access": _jwt_with_exp(1_000_000_000), "refresh": "r"}})
     assert backend.access_token_expired(text) is False
-
-
-import io
-from claude_swap.providers.openai import (
-    CODEX_OAUTH_CLIENT_ID,
-    CODEX_REFRESH_TOKEN_URL,
-)
-from claude_swap.providers import openai as openai_module
-from claude_swap.providers.types import RefreshResult
 
 
 class _FakeResponse:
