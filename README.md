@@ -238,7 +238,7 @@ cswap config unset autoswitch.threshold   # back to the default
 cswap config path                         # where settings.json lives
 ```
 
-`cswap config --help` lists every key with its valid range and default. Hand-editing the file still works — `cswap config` is just a safer front door. `list` and `get` take `--json` for scripting.
+`cswap config list` shows every key with its current value ("(default)" marks ones you haven't set); setting an invalid key or an out-of-range value fails loudly, naming the allowed range. Hand-editing the file still works - `cswap config` is just a safer front door. `list` and `get` take `--json` for scripting.
 
 </details>
 

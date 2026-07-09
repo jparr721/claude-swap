@@ -500,6 +500,13 @@ def test_codex_switch_positional_and_to_flag(stub_provider: dict[str, object]) -
     ]
 
 
+def test_codex_switch_rejects_both_positional_and_to(
+    stub_provider: dict[str, object],
+) -> None:
+    result = runner.invoke(app, ["codex", "openai", "switch", "2", "--to", "work"])
+    assert result.exit_code == 2
+
+
 def test_codex_remove(stub_provider: dict[str, object]) -> None:
     assert runner.invoke(app, ["codex", "openai", "remove", "2"]).exit_code == 0
     assert stub_provider["store"].calls == [("remove_account", {"identifier": "2"})]

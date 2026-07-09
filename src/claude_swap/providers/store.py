@@ -9,7 +9,6 @@ import os
 import subprocess
 import sys
 import tempfile
-from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,7 +25,7 @@ from claude_swap.providers.types import (
     ProviderDefinition,
     UsageFetchError,
 )
-from claude_swap.usage_store import FetchRecord, UsageEntry, UsageStore
+from claude_swap.usage_store import FetchRecord, UsageEntry, UsageStore, with_sentinel
 
 _logger = logging.getLogger("claude-swap")
 
@@ -629,10 +628,8 @@ class ProviderAccountStore:
         # account rewrites its record fingerprint, which changes the usage-store
         # identity and yields a fresh, strike-free entry.
         return {
-            account_num: (
-                replace(entry, sentinel=USAGE_RELOGIN_REQUIRED)
-                if entry.token_dead()
-                else entry
+            account_num: with_sentinel(
+                entry, USAGE_RELOGIN_REQUIRED if entry.token_dead() else None
             )
             for account_num, entry in entries.items()
         }
