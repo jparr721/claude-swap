@@ -80,11 +80,7 @@ def test_codex_store_adds_and_lists_account(
         return {"windows": [{"label": "Monthly", "pct": 12.0}]}
 
     monkeypatch.setattr(store.definition.backend, "fetch_usage", _fake_fetch_usage)
-
-    def fake_login() -> None:
-        store.auth_path.write_text(json.dumps(auth_payload), encoding="utf-8")
-
-    monkeypatch.setattr(store, "_run_headless_login", fake_login)
+    monkeypatch.setattr(store, "_run_headless_login", lambda: _fake_codex_login(store, auth_payload))
 
     store.add_account(label="work", slot=1)
     payload = store.list_accounts(json_output=True)
@@ -337,14 +333,18 @@ def test_current_account_number_reads_symlink_target(temp_home: Path) -> None:
     assert store._current_account_number(store._sequence_data(), None) == "2"
 
 
+def _fake_codex_login(store: ProviderAccountStore, payload: dict[str, object]) -> None:
+    # Real `codex login` deletes auth.json (removing a symlink) then writes a
+    # fresh REAL file - it does NOT write through a symlink.
+    store.auth_path.unlink(missing_ok=True)
+    store.auth_path.parent.mkdir(parents=True, exist_ok=True)
+    store.auth_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def test_codex_add_runs_device_login_then_registers(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = _codex_store()
 
-    def fake_login() -> None:
-        # Simulate `codex login --device-auth` writing through the active symlink.
-        store.auth_path.write_text(json.dumps(_codex_auth("acct-new")), encoding="utf-8")
-
-    monkeypatch.setattr(store, "_run_headless_login", fake_login)
+    monkeypatch.setattr(store, "_run_headless_login", lambda: _fake_codex_login(store, _codex_auth("acct-new")))
 
     store.add_account(label="work", slot=1)
 
@@ -354,6 +354,56 @@ def test_codex_add_runs_device_login_then_registers(temp_home: Path, monkeypatch
     data = store._sequence_data()
     assert data["accounts"]["1"]["label"] == "work"
     assert data["activeAccountNumber"] == 1
+
+
+def test_codex_add_relogin_persists_fresh_creds_into_existing_slot(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Re-login by label of an already-registered account must UPDATE that slot in
+    # place with the fresh credential, not mint a new slot (the reported bug).
+    store = _codex_store()
+    store._setup_directories()
+    store._init_sequence_file()
+    data = store._sequence_data()
+    _write(store._auth_backup_path("2"), _codex_auth("BBB"))  # stale stored target
+    store._set_account_record(data, "2", "jparr721@pm.me", store._metadata(json.dumps(_codex_auth("BBB"))))
+    store._write_json(store.sequence_file, data)
+    store._activate_auth_symlink(store._auth_backup_path("2"))
+    fresh = {"auth_mode": "chatgpt", "tokens": {"account_id": "BBB", "access_token": "FRESH"}}
+
+    monkeypatch.setattr(store, "_run_headless_login", lambda: _fake_codex_login(store, fresh))
+
+    store.add_account(label="jparr721@pm.me", slot=None)
+
+    data = store._sequence_data()
+    assert set(data["accounts"].keys()) == {"2"}  # no new slot minted
+    assert '"FRESH"' in store._auth_backup_path("2").read_text(encoding="utf-8")  # persisted into slot 2
+    assert store.auth_path.is_symlink()
+    assert store.auth_path.resolve() == store._auth_backup_path("2").resolve()
+
+
+def test_codex_add_relogin_by_identity_updates_existing_slot(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No --slot, no matching label: identity (account_id) match still updates the
+    # existing account rather than creating a duplicate.
+    store = _codex_store()
+    store._setup_directories()
+    store._init_sequence_file()
+    data = store._sequence_data()
+    _write(store._auth_backup_path("2"), _codex_auth("BBB"))
+    store._set_account_record(data, "2", "personal", store._metadata(json.dumps(_codex_auth("BBB"))))
+    store._write_json(store.sequence_file, data)
+    store._activate_auth_symlink(store._auth_backup_path("2"))
+    fresh = {"auth_mode": "chatgpt", "tokens": {"account_id": "BBB", "access_token": "FRESH2"}}
+
+    monkeypatch.setattr(store, "_run_headless_login", lambda: _fake_codex_login(store, fresh))
+
+    store.add_account(label=None, slot=None)
+
+    data = store._sequence_data()
+    assert set(data["accounts"].keys()) == {"2"}
+    assert '"FRESH2"' in store._auth_backup_path("2").read_text(encoding="utf-8")
 
 
 def test_codex_add_preserves_prior_managed_login(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -367,14 +417,11 @@ def test_codex_add_preserves_prior_managed_login(temp_home: Path, monkeypatch: p
     fresh_one = {"auth_mode": "chatgpt", "tokens": {"account_id": "acct-1", "access_token": "FRESH1"}}
     _write(store.auth_path, fresh_one)
 
-    def fake_login() -> None:
-        store.auth_path.write_text(json.dumps(_codex_auth("acct-2")), encoding="utf-8")
-
-    monkeypatch.setattr(store, "_run_headless_login", fake_login)
+    monkeypatch.setattr(store, "_run_headless_login", lambda: _fake_codex_login(store, _codex_auth("acct-2")))
 
     store.add_account(label="two", slot=2)
 
-    # account 1's fresh live bytes were preserved into its target before repointing
+    # account 1's fresh live bytes were preserved into its target before login clobbered auth.json
     assert '"FRESH1"' in store._auth_backup_path("1").read_text(encoding="utf-8")
     assert store.auth_path.resolve() == store._auth_backup_path("2").resolve()
 

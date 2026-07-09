@@ -574,33 +574,53 @@ class ProviderAccountStore:
         if result.returncode != 0:
             raise ConfigError(f"'{' '.join(argv)}' failed (exit {result.returncode})")
 
-    def _add_account_via_login(self, label: str | None, slot: int | None) -> None:
-        """Add an account by driving a headless login into a fresh per-account file.
+    def _resolve_login_slot(
+        self, data: dict[str, Any], slot: int | None, label: str | None, metadata: AuthMetadata
+    ) -> str:
+        """Which slot a just-logged-in account belongs to.
 
-        Repoints the active symlink at the target, runs the login (which writes
-        the credential through the symlink), then registers it. Preserves the
-        current managed login before repointing and restores it if login fails,
-        so a tracked account is never orphaned and a cancelled login never leaves
-        a dangling active auth file.
+        Explicit ``--slot`` wins; otherwise the existing account with the same
+        identity (``account_id``) is updated in place, then the existing account
+        with the requested label, and only failing those is a new slot minted.
+        Identity-first is what makes a re-login refresh the right account instead
+        of duplicating it.
         """
+        if slot is not None:
+            return str(slot)
+        if metadata.account_id:
+            for account_num, account in data.get("accounts", {}).items():
+                if account.get("accountId") == metadata.account_id:
+                    return account_num
+        if label is not None:
+            match = self._account_by_label(data, label.strip())
+            if match is not None:
+                return match
+        return str(self._next_account_number(data))
+
+    def _add_account_via_login(self, label: str | None, slot: int | None) -> None:
+        """Add or refresh an account by driving a headless login.
+
+        The login command (``codex login``) deletes ``auth.json`` - removing any
+        symlink - and writes a fresh *real* file, so we cannot rely on
+        write-through here. After login we read the fresh active auth, resolve
+        which slot it belongs to (existing by identity/label, else new), copy it
+        into that account's file, and point the active-auth symlink at it. The
+        current managed login is snapshotted first so the login clobbering
+        ``auth.json`` never loses a tracked account.
+        """
+        if slot is not None and slot < 1:
+            raise ConfigError(f"{self.definition.display_name} slot number must be >= 1")
         self._setup_directories()
         self._init_sequence_file()
+
         with FileLock(self.lock_file):
             data = self._sequence_data()
-            if slot is not None and slot < 1:
-                raise ConfigError(
-                    f"{self.definition.display_name} slot number must be >= 1"
-                )
-            account_num = str(slot) if slot is not None else str(self._next_account_number(data))
             active_text = self._read_active_auth()
             prior_num = None
             if active_text is not None:
                 prior_num = self._current_account_number(data, active_text)
-                if prior_num is not None and not self.auth_path.is_symlink():
+                if prior_num is not None:
                     self._write_account_auth(prior_num, active_text)
-            target = self._auth_backup_path(account_num)
-            target.unlink(missing_ok=True)  # empty target => codex login revokes nothing
-            self._activate_auth_symlink(target)
 
         try:
             self._run_headless_login()
@@ -608,15 +628,15 @@ class ProviderAccountStore:
             with FileLock(self.lock_file):
                 if prior_num is not None:
                     self._activate_auth_symlink(self._auth_backup_path(prior_num))
-                else:
-                    self.auth_path.unlink(missing_ok=True)
             raise
 
         with FileLock(self.lock_file):
             data = self._sequence_data()
-            text = self._read_required_active_auth()  # reads through the symlink -> target
+            text = self._read_required_active_auth()  # the fresh real auth.json from the login
             metadata = self._metadata(text)
+            account_num = self._resolve_login_slot(data, slot, label, metadata)
             existing_account = data.get("accounts", {}).get(account_num, {})
+            action = "Updated" if existing_account else "Added"
             if label is None and existing_account:
                 resolved_label = _safe_str(existing_account.get("label"))
             else:
@@ -627,13 +647,15 @@ class ProviderAccountStore:
                     f"{self.definition.display_name} account label '{resolved_label}' already "
                     f"exists as Account-{duplicate}"
                 )
+            self._write_account_auth(account_num, text)  # persist fresh creds into the slot file
+            self._activate_auth_symlink(self._auth_backup_path(account_num))
             self._set_account_record(data, account_num, resolved_label, metadata)
             data["activeAccountNumber"] = int(account_num)
             data["lastUpdated"] = get_timestamp()
             self._write_json(self.sequence_file, data)
 
         print(
-            f"{accent('Added')} {self.definition.display_name} Account-{account_num}: "
+            f"{accent(action)} {self.definition.display_name} Account-{account_num}: "
             f"{resolved_label}"
         )
 

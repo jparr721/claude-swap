@@ -184,7 +184,11 @@ def test_codex_wrapper_uses_provider_store_and_compat_usage_hook(
     monkeypatch.setattr("claude_swap.codex.fetch_codex_usage", fake_fetch)
 
     def fake_login() -> None:
-        switcher._store.auth_path.write_text(json.dumps(_codex_auth("acct-1")), encoding="utf-8")
+        # Real `codex login` deletes auth.json and writes a fresh real file.
+        auth_path = switcher._store.auth_path
+        auth_path.unlink(missing_ok=True)
+        auth_path.parent.mkdir(parents=True, exist_ok=True)
+        auth_path.write_text(json.dumps(_codex_auth("acct-1")), encoding="utf-8")
 
     monkeypatch.setattr(switcher._store, "_run_headless_login", fake_login)
 
