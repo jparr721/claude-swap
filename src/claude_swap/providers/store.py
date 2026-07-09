@@ -699,12 +699,20 @@ class ProviderAccountStore:
 
     def switch(self, identifier: str | None, json_output: bool) -> dict | None:
         self._setup_directories()
-        if self.definition.ref.backend == "openai":
+        if self.definition.switch_mode == "snapshot-refused":
             raise ConfigError(
                 f"{self.definition.display_name} cannot safely restore stored OpenAI OAuth "
                 f"snapshots. Run '{self.definition.frontend.login_command}' for the target "
                 "account, then re-add it."
             )
+        return self._switch_symlink(identifier, json_output)
+
+    def _switch_symlink(self, identifier: str | None, json_output: bool) -> dict | None:
+        """Switch by repointing the active auth symlink at the target's stored file.
+
+        No byte copy and no re-snapshot: the outgoing account's file is the live
+        file Codex already rotates in place, so it is current by construction.
+        """
         with FileLock(self.lock_file):
             data = self._sequence_data()
             if not data.get("accounts"):
@@ -716,23 +724,24 @@ class ProviderAccountStore:
                 target_account = self._rotation_target(data)
             else:
                 target_account = self._resolve_account_identifier(data, identifier)
-            if target_account is None:
+            if target_account is None or target_account not in data.get("accounts", {}):
                 raise AccountNotFoundError(
                     f"No {self.definition.display_name} account found with identifier: {identifier}"
                 )
-            if target_account not in data.get("accounts", {}):
-                raise AccountNotFoundError(
-                    f"{self.definition.display_name} Account-{target_account} does not exist"
+
+            target_file = self._auth_backup_path(target_account)
+            if not target_file.exists():
+                ref = self.definition.ref
+                raise ConfigError(
+                    f"{self.definition.display_name} Account-{target_account} has no stored "
+                    f"credential. Re-add it with: cswap {ref.frontend} {ref.backend} "
+                    f"add --slot {target_account}"
                 )
 
-            active_auth = self._read_active_auth()
-            if active_auth is not None:
-                current_num = self._current_account_number(data, active_auth)
-            else:
-                current_num = None
+            current_num = self._current_account_number(data, None)
             from_ref = self._account_ref(data, current_num)
             to_ref = self._account_ref(data, target_account)
-            if current_num == target_account:
+            if current_num == target_account and self.auth_path.is_symlink():
                 result = {
                     "schemaVersion": SCHEMA_VERSION,
                     "provider": self._provider_payload(),
@@ -752,26 +761,11 @@ class ProviderAccountStore:
                 )
                 return None
 
-            if active_auth is not None and current_num is not None:
-                metadata = self._metadata(active_auth)
-                current_label = data["accounts"][current_num].get("label", "")
-                self._write_account_auth(current_num, active_auth)
-                self._set_account_record(data, current_num, current_label, metadata)
-
-            target_auth = self._read_account_auth(target_account)
-            self._stored_metadata(target_account, target_auth)
-            had_active_auth = active_auth is not None
-            self._write_active_auth(target_auth)
-            try:
-                data["activeAccountNumber"] = int(target_account)
-                data["lastUpdated"] = get_timestamp()
-                self._write_json(self.sequence_file, data)
-            except ConfigError:
-                if had_active_auth and active_auth is not None:
-                    self._write_active_auth(active_auth)
-                else:
-                    self.auth_path.unlink(missing_ok=True)
-                raise
+            self._adopt_active_real_file(data)
+            self._activate_auth_symlink(target_file)
+            data["activeAccountNumber"] = int(target_account)
+            data["lastUpdated"] = get_timestamp()
+            self._write_json(self.sequence_file, data)
 
         label = data["accounts"][target_account].get("label", "")
         result = {

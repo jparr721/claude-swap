@@ -107,18 +107,22 @@ def test_opencode_store_refuses_to_restore_openai_oauth_snapshot(temp_home: Path
     assert json.loads(auth_path.read_text(encoding="utf-8"))["openai"]["accountId"] == "acct-2"
 
 
-def test_codex_store_refuses_to_restore_openai_oauth_snapshot(temp_home: Path) -> None:
-    auth_path = temp_home / ".codex" / "auth.json"
-    _write(auth_path, _codex_auth("acct-1"))
+def test_codex_store_switches_by_symlink_rotation(temp_home: Path) -> None:
     store = _codex_store()
-    store.add_account(label="one", slot=1)
-    _write(auth_path, _codex_auth("acct-2"))
-    store.add_account(label="two", slot=2)
+    store._setup_directories()
+    store._init_sequence_file()
+    data = store._sequence_data()
+    for num, acct in (("1", "acct-1"), ("2", "acct-2")):
+        _write(store._auth_backup_path(num), _codex_auth(acct))
+        store._set_account_record(data, num, f"a{num}", store._metadata(json.dumps(_codex_auth(acct))))
+    store._write_json(store.sequence_file, data)
+    store._activate_auth_symlink(store._auth_backup_path("1"))
 
-    with pytest.raises(ConfigError, match="cannot safely restore stored OpenAI OAuth"):
-        store.switch("1", json_output=False)
+    result = store.switch(None, json_output=True)  # rotate to next
 
-    assert json.loads(auth_path.read_text(encoding="utf-8"))["tokens"]["account_id"] == "acct-2"
+    assert result["switched"] is True
+    assert result["to"]["number"] == 2
+    assert store.auth_path.resolve() == store._auth_backup_path("2").resolve()
 
 
 def test_missing_active_auth_mentions_provider_login(temp_home: Path) -> None:
@@ -277,3 +281,40 @@ def test_adopt_active_real_file_noop_when_symlink(temp_home: Path) -> None:
     store._activate_auth_symlink(target)
 
     store._adopt_active_real_file(store._sequence_data())  # must not raise
+
+
+def test_codex_switch_repoints_symlink_without_touching_bytes(temp_home: Path) -> None:
+    store = _codex_store()
+    store._setup_directories()
+    store._init_sequence_file()
+    data = store._sequence_data()
+    for num, acct in (("1", "acct-1"), ("2", "acct-2")):
+        _write(store._auth_backup_path(num), _codex_auth(acct))
+        store._set_account_record(data, num, f"a{num}", store._metadata(json.dumps(_codex_auth(acct))))
+    store._write_json(store.sequence_file, data)
+    store._activate_auth_symlink(store._auth_backup_path("1"))
+
+    store.switch("2", json_output=False)
+
+    assert store.auth_path.is_symlink()
+    assert store.auth_path.resolve() == store._auth_backup_path("2").resolve()
+    # account-1 target bytes are untouched (no snapshot write)
+    assert '"acct-1"' in store._auth_backup_path("1").read_text(encoding="utf-8")
+
+
+def test_codex_switch_to_missing_credential_tells_user_to_readd(temp_home: Path) -> None:
+    store = _codex_store()
+    store._setup_directories()
+    store._init_sequence_file()
+    data = store._sequence_data()
+    store._set_account_record(data, "1", "one", store._metadata(json.dumps(_codex_auth("acct-1"))))
+    store._write_json(store.sequence_file, data)  # registered but NO target file on disk
+
+    with pytest.raises(ConfigError, match="add --slot 1"):
+        store.switch("1", json_output=False)
+
+
+def test_opencode_switch_still_refused(temp_home: Path) -> None:
+    store = _opencode_store()
+    with pytest.raises(ConfigError, match="cannot safely restore stored OpenAI OAuth"):
+        store.switch("1", json_output=False)
