@@ -22,6 +22,21 @@ class UsageFetchError:
 
 
 @dataclass(frozen=True)
+class RefreshResult:
+    """Result of a refresh-token grant attempt (matches oauth.RefreshOutcome).
+
+    - error is None: success, auth_text is the full rotated auth JSON
+    - "invalid_grant": the token endpoint rejected the grant; re-login required
+    - "no_refresh_token": no usable refresh token in the auth (or backend
+      does not support refresh)
+    - "transient": network/server error; the token may still be valid
+    """
+
+    auth_text: str | None
+    error: str | None
+
+
+@dataclass(frozen=True)
 class ProviderRef:
     frontend: str
     backend: str
@@ -49,6 +64,12 @@ class BackendAdapter(Protocol):
     def fetch_usage(
         self, auth_text: str, timeout_s: float
     ) -> dict[str, Any] | str | UsageFetchError:
+        raise NotImplementedError
+
+    def access_token_expired(self, auth_text: str) -> bool:
+        raise NotImplementedError
+
+    def refresh_auth(self, auth_text: str, timeout_s: float) -> RefreshResult:
         raise NotImplementedError
 
 

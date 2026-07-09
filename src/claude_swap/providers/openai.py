@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import urllib.error
@@ -15,9 +16,30 @@ from claude_swap.providers.types import AuthMetadata, UsageFetchError
 OPENAI_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 OPENAI_USAGE_TIMEOUT_S = 10.0
 
+# Refresh decisions use the same 5-minute pre-expiry buffer as oauth.py.
+ACCESS_TOKEN_EXPIRY_BUFFER_S = 5 * 60
+
 
 def _fingerprint(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _jwt_exp_seconds(token: str) -> float | None:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload + padding))
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(claims, dict):
+        return None
+    exp = claims.get("exp")
+    if not isinstance(exp, (int, float)):
+        return None
+    return float(exp)
 
 
 def _safe_str(value: Any) -> str:
@@ -185,6 +207,32 @@ class CodexOpenAIBackend:
             "claude-swap/codex-openai-usage",
         )
 
+    def access_token_expired(self, auth_text: str) -> bool:
+        """Whether the stored access token is expired or near expiry.
+
+        No tokens dict means an API-key-only account: nothing to refresh,
+        never expired. A tokens dict with a missing or unverifiable access
+        token is treated as expired so the refresh path gets a chance to
+        mint a usable one.
+        """
+        try:
+            data = json.loads(auth_text)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(data, dict):
+            return False
+        tokens = data.get("tokens")
+        if not isinstance(tokens, dict):
+            return False
+        access_token = tokens.get("access_token")
+        if not isinstance(access_token, str) or not access_token:
+            return True
+        exp = _jwt_exp_seconds(access_token)
+        if exp is None:
+            return True
+        now = datetime.now(timezone.utc).timestamp()
+        return now + ACCESS_TOKEN_EXPIRY_BUFFER_S >= exp
+
 
 class OpencodeOpenAIBackend:
     backend_id = "openai"
@@ -224,3 +272,8 @@ class OpencodeOpenAIBackend:
             self.metadata_from_text,
             "claude-swap/opencode-openai-usage",
         )
+
+    def access_token_expired(self, auth_text: str) -> bool:
+        # opencode token refresh is deferred (different client id and auth
+        # shape); never triggering the refresh path keeps behavior unchanged.
+        return False
