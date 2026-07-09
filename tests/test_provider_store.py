@@ -838,3 +838,49 @@ def test_materialize_active_auth_removes_dangling_symlink(temp_home: Path) -> No
 
     assert not store.auth_path.is_symlink()
     assert not store.auth_path.exists()
+
+
+def test_materialize_active_auth_write_failure_preserves_symlink(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed write must not have unlinked the symlink first - login survives."""
+    store = _codex_store()
+    store._setup_directories()
+    store._init_sequence_file()
+    _write(store._auth_backup_path("1"), _codex_auth("acct-1"))
+    store._activate_auth_symlink(store._auth_backup_path("1"))
+
+    def failing_write(text: str) -> None:
+        raise ConfigError("disk full")
+
+    monkeypatch.setattr(store, "_write_active_auth", failing_write)
+
+    with pytest.raises(ConfigError, match="disk full"):
+        store.materialize_active_auth()
+
+    assert store.auth_path.is_symlink()
+
+
+def test_materialize_active_auth_unreadable_target_raises(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A permission/IO error on a still-existing target must raise, not discard."""
+    store = _codex_store()
+    store._setup_directories()
+    store._init_sequence_file()
+    _write(store._auth_backup_path("1"), _codex_auth("acct-1"))
+    store._activate_auth_symlink(store._auth_backup_path("1"))
+
+    real_read_text = Path.read_text
+
+    def denying_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == "account-1.json":
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denying_read_text)
+
+    with pytest.raises(ConfigError, match="Failed to read"):
+        store.materialize_active_auth()
+
+    assert store.auth_path.is_symlink()

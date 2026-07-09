@@ -316,10 +316,17 @@ class ProviderAccountStore:
             return
         try:
             text = target.read_text(encoding="utf-8")
-        except OSError:
+        except FileNotFoundError:
             self.auth_path.unlink(missing_ok=True)
             return
-        self.auth_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ConfigError(
+                f"Failed to read {self.definition.display_name} active auth "
+                f"target {target}: {exc}"
+            ) from exc
+        # _write_active_auth os.replace()s the symlink with the real file
+        # atomically - no prior unlink, so a write failure leaves the
+        # symlink (and the login) intact.
         self._write_active_auth(text)
 
     def _adopt_active_real_file(self, data: dict[str, Any]) -> None:
