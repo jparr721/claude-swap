@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from claude_swap import oauth
-from claude_swap.exceptions import AccountNotFoundError, ConfigError, ValidationError
+from claude_swap.exceptions import AccountNotFoundError, ConfigError, LockError, ValidationError
 from claude_swap.locking import FileLock
 from claude_swap.models import get_timestamp
 from claude_swap.json_output import SCHEMA_VERSION, usage_freshness_fields
@@ -25,6 +26,8 @@ from claude_swap.providers.types import (
     UsageFetchError,
 )
 from claude_swap.usage_store import FetchRecord, UsageEntry, UsageStore
+
+_logger = logging.getLogger("claude-swap")
 
 _USAGE_AGE_NOTE_S = 90.0
 
@@ -449,9 +452,17 @@ class ProviderAccountStore:
                 identities[account_num] = (account_id or fingerprint or label or account_num, "")
         return identities
 
-    def _fetch_usage_record(self, account_num: str) -> FetchRecord:
+    def _fetch_usage_record(self, account_num: str, active_num: str | None) -> FetchRecord:
         try:
             auth_text = self._read_account_auth(account_num)
+        except ConfigError as exc:
+            return FetchRecord(error=str(exc))
+        if account_num != active_num:
+            refreshed = self._maybe_refresh_inactive_auth(account_num, auth_text)
+            if isinstance(refreshed, FetchRecord):
+                return refreshed
+            auth_text = refreshed
+        try:
             usage = self.definition.backend.fetch_usage(auth_text, OPENAI_USAGE_TIMEOUT_S)
         except ConfigError as exc:
             return FetchRecord(error=str(exc))
@@ -480,6 +491,74 @@ class ProviderAccountStore:
             return FetchRecord(error=usage.message, retry_after_s=usage.retry_after_s)
         return FetchRecord(error=usage or "usage unavailable")
 
+    def _maybe_refresh_inactive_auth(
+        self, account_num: str, auth_text: str
+    ) -> str | FetchRecord:
+        """Refresh an inactive account's expired access token and persist it.
+
+        The active account is never handled here: the frontend (codex) owns
+        and rotates its file in place, and refreshing it would double-spend
+        the single-use refresh token. Refresh cadence is usage-driven - this
+        runs only when the account's usage entry has gone stale, not the
+        moment its token expires.
+
+        Returns the auth text to fetch usage with, or a FetchRecord whose
+        error must be recorded instead of fetching.
+        """
+        backend = self.definition.backend
+        if not backend.access_token_expired(auth_text):
+            return auth_text
+        outcome = backend.refresh_auth(auth_text, OPENAI_USAGE_TIMEOUT_S)
+        if outcome.error == "no_refresh_token":
+            return auth_text
+        if outcome.error == "invalid_grant":
+            return FetchRecord(error="invalid_grant")
+        if outcome.error is not None or outcome.auth_text is None:
+            return FetchRecord(error="token refresh failed")
+        if not self._persist_rotated_auth(account_num, auth_text, outcome.auth_text):
+            return FetchRecord(error="token refresh not persisted")
+        return outcome.auth_text
+
+    def _persist_rotated_auth(
+        self, account_num: str, old_auth_text: str, new_auth_text: str
+    ) -> bool:
+        """Persist a rotated credential under the store lock, with a re-check.
+
+        The refresh HTTP call ran without the lock, so re-verify nothing moved:
+        the account still exists, is still not the symlink target, and its
+        on-disk auth is byte-identical to what the refresh consumed. Any
+        mismatch discards the rotation - the concurrent writer owns the file
+        now. The sequence record (incl. fingerprint) is deliberately left
+        untouched: the fingerprint feeds the usage-store identity key, and the
+        active account's file already drifts from its recorded fingerprint via
+        codex write-through; accountId is the primary identity key.
+        """
+        try:
+            with FileLock(self.lock_file):
+                data = self._sequence_data()
+                if account_num not in data.get("accounts", {}):
+                    return False
+                backup_path = self._auth_backup_path(account_num)
+                target = self._active_symlink_target()
+                if target is not None and backup_path.resolve() == target:
+                    return False
+                try:
+                    on_disk = self._read_account_auth(account_num)
+                except ConfigError:
+                    return False
+                if on_disk != old_auth_text:
+                    return False
+                self._write_account_auth(account_num, new_auth_text)
+                return True
+        except (ConfigError, LockError) as exc:
+            _logger.debug(
+                "discarding rotated %s auth for account %s: %s",
+                self.definition.display_name,
+                account_num,
+                exc,
+            )
+            return False
+
     def _collect_usage_entries(self, data: dict[str, Any]) -> dict[str, UsageEntry]:
         identities = self._usage_identities(data)
         if not identities:
@@ -495,10 +574,11 @@ class ProviderAccountStore:
             and not entries[account_num].claimed(now)
         ]
         if to_fetch:
+            active_num = self._current_account_number(data, None)
             store.claim(to_fetch, identities)
             store.record(
                 {
-                    account_num: self._fetch_usage_record(account_num)
+                    account_num: self._fetch_usage_record(account_num, active_num)
                     for account_num in to_fetch
                 },
                 identities,

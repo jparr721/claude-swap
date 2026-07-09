@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
@@ -10,7 +11,7 @@ from claude_swap.paths import get_backup_root, get_provider_store_root
 from claude_swap.providers.frontends import CodexFrontend, OpencodeFrontend
 from claude_swap.providers.openai import CodexOpenAIBackend, OpencodeOpenAIBackend
 from claude_swap.providers.store import ProviderAccountStore
-from claude_swap.providers.types import ProviderDefinition, ProviderRef
+from claude_swap.providers.types import ProviderDefinition, ProviderRef, RefreshResult
 
 
 def _codex_auth(account_id: str) -> dict[str, object]:
@@ -498,3 +499,251 @@ def test_first_switch_adopts_live_real_file_and_symlinks(temp_home: Path) -> Non
     assert '"FRESH"' in store._auth_backup_path("1").read_text(encoding="utf-8")
     assert store.auth_path.is_symlink()
     assert store.auth_path.resolve() == store._auth_backup_path("2").resolve()
+
+
+def _jwt_with_exp(exp: int) -> str:
+    header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).rstrip(b"=").decode()
+    return f"{header}.{payload}.sig"
+
+
+def _codex_oauth_auth(account_id: str, exp: int) -> dict[str, object]:
+    return {
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "account_id": account_id,
+            "access_token": _jwt_with_exp(exp),
+            "refresh_token": f"refresh-{account_id}",
+        },
+    }
+
+
+_EXPIRED = 1_000_000_000  # 2001
+_FRESH = 4_000_000_000  # 2096
+
+
+def _seeded_codex_store(
+    accounts: dict[str, dict[str, object]], active: str
+) -> ProviderAccountStore:
+    """Store with the given account files, records, and active symlink."""
+    store = _codex_store()
+    store._setup_directories()
+    store._init_sequence_file()
+    data = store._sequence_data()
+    for num, payload in accounts.items():
+        _write(store._auth_backup_path(num), payload)
+        store._set_account_record(
+            data, num, f"acct-label-{num}", store._metadata(json.dumps(payload))
+        )
+    data["activeAccountNumber"] = int(active)
+    store._write_json(store.sequence_file, data)
+    store._activate_auth_symlink(store._auth_backup_path(active))
+    return store
+
+
+def test_inactive_expired_account_is_refreshed_and_persisted(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seeded_codex_store(
+        {"1": _codex_oauth_auth("acct-1", _FRESH), "2": _codex_oauth_auth("acct-2", _EXPIRED)},
+        active="1",
+    )
+    rotated = dict(_codex_oauth_auth("acct-2", _FRESH))
+    rotated["tokens"]["refresh_token"] = "rotated-refresh"  # type: ignore[index]
+    rotated_text = json.dumps(rotated)
+    refresh_calls: list[str] = []
+    fetch_auths: list[str] = []
+
+    def fake_refresh(auth_text: str, timeout_s: float) -> RefreshResult:
+        refresh_calls.append(auth_text)
+        return RefreshResult(rotated_text, None)
+
+    def fake_fetch(auth_text: str, timeout_s: float) -> dict[str, object]:
+        fetch_auths.append(auth_text)
+        return {"windows": [{"label": "5h", "pct": 10.0}]}
+
+    monkeypatch.setattr(store.definition.backend, "refresh_auth", fake_refresh)
+    monkeypatch.setattr(store.definition.backend, "fetch_usage", fake_fetch)
+
+    payload = store.list_accounts(json_output=True)
+
+    assert len(refresh_calls) == 1  # only the inactive expired account
+    assert json.loads(refresh_calls[0])["tokens"]["account_id"] == "acct-2"
+    assert rotated_text in fetch_auths  # usage fetched with the rotated token
+    on_disk = json.loads(store._auth_backup_path("2").read_text(encoding="utf-8"))
+    assert on_disk["tokens"]["refresh_token"] == "rotated-refresh"
+    rows = {row["number"]: row for row in payload["accounts"]}
+    assert rows[2]["usageStatus"] == "ok"
+
+
+def test_active_account_is_never_refreshed_even_when_expired(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seeded_codex_store(
+        {"1": _codex_oauth_auth("acct-1", _EXPIRED), "2": _codex_oauth_auth("acct-2", _FRESH)},
+        active="1",
+    )
+    refresh_calls: list[str] = []
+
+    def fake_refresh(auth_text: str, timeout_s: float) -> RefreshResult:
+        refresh_calls.append(auth_text)
+        return RefreshResult(auth_text, None)
+
+    monkeypatch.setattr(store.definition.backend, "refresh_auth", fake_refresh)
+    monkeypatch.setattr(
+        store.definition.backend, "fetch_usage", lambda auth_text, timeout_s: {"windows": []}
+    )
+
+    store.list_accounts(json_output=True)
+
+    assert refresh_calls == []
+
+
+def test_refresh_discarded_when_account_becomes_active_mid_refresh(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seeded_codex_store(
+        {"1": _codex_oauth_auth("acct-1", _FRESH), "2": _codex_oauth_auth("acct-2", _EXPIRED)},
+        active="1",
+    )
+    original_text = store._auth_backup_path("2").read_text(encoding="utf-8")
+
+    def fake_refresh(auth_text: str, timeout_s: float) -> RefreshResult:
+        # A concurrent switch repoints the symlink at the account under refresh.
+        store._activate_auth_symlink(store._auth_backup_path("2"))
+        return RefreshResult(json.dumps(_codex_oauth_auth("acct-2", _FRESH)), None)
+
+    monkeypatch.setattr(store.definition.backend, "refresh_auth", fake_refresh)
+    monkeypatch.setattr(
+        store.definition.backend, "fetch_usage", lambda auth_text, timeout_s: {"windows": []}
+    )
+
+    payload = store.list_accounts(json_output=True)
+
+    assert store._auth_backup_path("2").read_text(encoding="utf-8") == original_text
+    rows = {row["number"]: row for row in payload["accounts"]}
+    assert rows[2]["usageStatus"] == "unavailable"
+    assert rows[2]["usageError"] == "token refresh not persisted"
+
+
+def test_refresh_discarded_when_disk_auth_changed_mid_refresh(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seeded_codex_store(
+        {"1": _codex_oauth_auth("acct-1", _FRESH), "2": _codex_oauth_auth("acct-2", _EXPIRED)},
+        active="1",
+    )
+    concurrent = json.dumps(_codex_oauth_auth("acct-2-relogin", _FRESH))
+
+    def fake_refresh(auth_text: str, timeout_s: float) -> RefreshResult:
+        # A concurrent re-login rewrites the account file while we refresh.
+        store._auth_backup_path("2").write_text(concurrent, encoding="utf-8")
+        return RefreshResult(json.dumps(_codex_oauth_auth("acct-2", _FRESH)), None)
+
+    monkeypatch.setattr(store.definition.backend, "refresh_auth", fake_refresh)
+    monkeypatch.setattr(
+        store.definition.backend, "fetch_usage", lambda auth_text, timeout_s: {"windows": []}
+    )
+
+    store.list_accounts(json_output=True)
+
+    assert store._auth_backup_path("2").read_text(encoding="utf-8") == concurrent
+
+
+def test_persist_write_failure_is_transient_error_not_success(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seeded_codex_store(
+        {"1": _codex_oauth_auth("acct-1", _FRESH), "2": _codex_oauth_auth("acct-2", _EXPIRED)},
+        active="1",
+    )
+    monkeypatch.setattr(
+        store.definition.backend,
+        "refresh_auth",
+        lambda auth_text, timeout_s: RefreshResult(
+            json.dumps(_codex_oauth_auth("acct-2", _FRESH)), None
+        ),
+    )
+    monkeypatch.setattr(
+        store.definition.backend, "fetch_usage", lambda auth_text, timeout_s: {"windows": []}
+    )
+
+    def broken_write(account_num: str, text: str) -> None:
+        raise ConfigError("disk full")
+
+    monkeypatch.setattr(store, "_write_account_auth", broken_write)
+
+    payload = store.list_accounts(json_output=True)
+
+    rows = {row["number"]: row for row in payload["accounts"]}
+    assert rows[2]["usageStatus"] == "unavailable"
+    assert rows[2]["usageError"] == "token refresh not persisted"
+
+
+def test_transient_refresh_failure_backs_off_without_persist(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seeded_codex_store(
+        {"1": _codex_oauth_auth("acct-1", _FRESH), "2": _codex_oauth_auth("acct-2", _EXPIRED)},
+        active="1",
+    )
+    original_text = store._auth_backup_path("2").read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        store.definition.backend,
+        "refresh_auth",
+        lambda auth_text, timeout_s: RefreshResult(None, "transient"),
+    )
+    monkeypatch.setattr(
+        store.definition.backend, "fetch_usage", lambda auth_text, timeout_s: {"windows": []}
+    )
+
+    payload = store.list_accounts(json_output=True)
+
+    assert store._auth_backup_path("2").read_text(encoding="utf-8") == original_text
+    rows = {row["number"]: row for row in payload["accounts"]}
+    assert rows[2]["usageError"] == "token refresh failed"
+
+
+def test_no_refresh_token_falls_through_to_plain_fetch(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    auth_no_refresh = {
+        "auth_mode": "chatgpt",
+        "tokens": {"account_id": "acct-2", "access_token": _jwt_with_exp(_EXPIRED)},
+    }
+    store = _seeded_codex_store(
+        {"1": _codex_oauth_auth("acct-1", _FRESH), "2": auth_no_refresh}, active="1"
+    )
+    fetch_auths: list[str] = []
+
+    def fake_fetch(auth_text: str, timeout_s: float) -> dict[str, object]:
+        fetch_auths.append(auth_text)
+        return {"windows": []}
+
+    monkeypatch.setattr(store.definition.backend, "fetch_usage", fake_fetch)
+
+    store.list_accounts(json_output=True)
+
+    # The real refresh_auth returned no_refresh_token; usage was still fetched
+    # with the on-disk auth, unchanged.
+    assert json.dumps(auth_no_refresh) in fetch_auths
+
+
+def test_opencode_accounts_never_hit_the_refresh_path(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    auth_path = temp_home / ".local" / "share" / "opencode" / "auth.json"
+    _write(auth_path, _opencode_auth("acct-1"))
+    store = _opencode_store()
+    store.add_account(label="one", slot=1)
+    fetch_calls: list[str] = []
+
+    def fake_fetch(auth_text: str, timeout_s: float) -> dict[str, object]:
+        fetch_calls.append(auth_text)
+        return {"windows": []}
+
+    monkeypatch.setattr(store.definition.backend, "fetch_usage", fake_fetch)
+
+    store.list_accounts(json_output=True)
+
+    assert len(fetch_calls) == 1  # fetched as today, no refresh interference
