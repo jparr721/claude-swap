@@ -13,10 +13,15 @@ from types import SimpleNamespace
 import typer
 
 from claude_swap import __version__
-from claude_swap.exceptions import ClaudeSwitchError
+from claude_swap.exceptions import ClaudeSwitchError, ConfigError
 from claude_swap.json_output import error_envelope, provider_envelope
 from claude_swap.printer import dimmed, error, force_utf8_output, muted
-from claude_swap.providers.registry import get_provider, managed_aggregate_providers
+from claude_swap.providers.registry import (
+    get_provider,
+    managed_aggregate_providers,
+    provider_definitions,
+)
+from claude_swap.providers.store import ProviderAccountStore
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 app = typer.Typer(
@@ -695,6 +700,113 @@ def claude_auto(
             file=sys.stderr if json_output else sys.stdout,
         )
         raise typer.Exit(130) from None
+
+
+def _build_backend_app(frontend: str, backend: str, display_name: str) -> typer.Typer:
+    """Verb commands for one (frontend, backend) provider, wired to its store."""
+    backend_app = typer.Typer(
+        no_args_is_help=True, help=f"Manage {display_name} accounts"
+    )
+
+    def _store() -> ProviderAccountStore:
+        try:
+            return get_provider(frontend, backend)
+        except KeyError as exc:
+            # Unreachable through the generated tree; guard for direct callers.
+            raise ConfigError(str(exc)) from exc
+
+    @backend_app.command("list")
+    def provider_list(
+        json_output: bool = typer.Option(
+            False, "--json", help="Emit machine-readable JSON to stdout"
+        ),
+    ) -> None:
+        """List managed accounts."""
+        _dispatch(
+            lambda: _store().list_accounts(json_output=json_output),
+            json_mode=json_output,
+            update_check=False,
+        )
+
+    @backend_app.command("status")
+    def provider_status(
+        json_output: bool = typer.Option(
+            False, "--json", help="Emit machine-readable JSON to stdout"
+        ),
+    ) -> None:
+        """Show the active account."""
+        _dispatch(
+            lambda: _store().status(json_output=json_output),
+            json_mode=json_output,
+            update_check=False,
+        )
+
+    @backend_app.command("add")
+    def provider_add(
+        label: str | None = typer.Option(
+            None, "--label", metavar="LABEL", help="Display label for the account"
+        ),
+        slot: int | None = typer.Option(
+            None, "--slot", metavar="NUM", help="Store in a specific slot"
+        ),
+    ) -> None:
+        """Add or refresh an account (drives the frontend's login flow)."""
+        _dispatch(
+            lambda: _store().add_account(label=label, slot=slot),
+            json_mode=False,
+            update_check=False,
+        )
+
+    @backend_app.command("switch")
+    def provider_switch(
+        target: str | None = typer.Argument(None, metavar="[NUM|LABEL]"),
+        to: str | None = typer.Option(None, "--to", metavar="NUM|LABEL", help="Switch target"),
+        json_output: bool = typer.Option(
+            False, "--json", help="Emit machine-readable JSON to stdout"
+        ),
+    ) -> None:
+        """Rotate to the next account, or switch to a specific one."""
+        if target is not None and to is not None:
+            raise typer.BadParameter("give either a positional target or --to, not both")
+        resolved = target if target is not None else to
+        _dispatch(
+            lambda: _store().switch(resolved, json_output=json_output),
+            json_mode=json_output,
+            update_check=False,
+        )
+
+    @backend_app.command("remove")
+    def provider_remove(
+        identifier: str = typer.Argument(..., metavar="NUM|LABEL"),
+    ) -> None:
+        """Remove a managed account."""
+        _dispatch(
+            lambda: _store().remove_account(identifier),
+            json_mode=False,
+            update_check=False,
+        )
+
+    return backend_app
+
+
+def _register_provider_apps() -> None:
+    frontend_apps: dict[str, typer.Typer] = {}
+    for definition in provider_definitions():
+        frontend = definition.ref.frontend
+        backend = definition.ref.backend
+        if frontend not in frontend_apps:
+            frontend_apps[frontend] = typer.Typer(
+                no_args_is_help=True,
+                help=f"{definition.frontend.display_name} frontend",
+            )
+            app.add_typer(frontend_apps[frontend], name=frontend)
+        frontend_apps[frontend].add_typer(
+            _build_backend_app(frontend, backend, definition.display_name),
+            name=backend,
+        )
+
+
+_register_provider_apps()
 
 
 def _prog_name() -> str:

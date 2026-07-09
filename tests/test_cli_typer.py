@@ -428,3 +428,92 @@ def test_auto_once_exit_code_reflects_tick_outcome(
     assert result.exit_code == 2
     assert captured["dry_run"] is True
     assert captured["settings"].threshold == 80.0
+
+
+class _StubProviderStore:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def list_accounts(self, json_output: bool = False) -> dict | None:
+        self.calls.append(("list_accounts", {"json_output": json_output}))
+        if json_output:
+            return {
+                "schemaVersion": 1,
+                "provider": {"frontend": "codex", "backend": "openai"},
+                "activeAccountNumber": None,
+                "accounts": [],
+            }
+        return None
+
+    def status(self, json_output: bool = False) -> dict | None:
+        self.calls.append(("status", {"json_output": json_output}))
+        return {"schemaVersion": 1, "active": None} if json_output else None
+
+    def add_account(self, label: str | None, slot: int | None) -> None:
+        self.calls.append(("add_account", {"label": label, "slot": slot}))
+
+    def switch(self, identifier: str | None, json_output: bool) -> dict | None:
+        self.calls.append(("switch", {"identifier": identifier, "json_output": json_output}))
+        return None
+
+    def remove_account(self, identifier: str) -> None:
+        self.calls.append(("remove_account", {"identifier": identifier}))
+
+
+@pytest.fixture
+def stub_provider(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    captured: dict[str, object] = {"store": _StubProviderStore()}
+
+    def fake_get_provider(frontend: str, backend: str) -> _StubProviderStore:
+        captured["ref"] = (frontend, backend)
+        return captured["store"]
+
+    monkeypatch.setattr("claude_swap.cli.get_provider", fake_get_provider)
+    return captured
+
+
+def test_codex_list_json(stub_provider: dict[str, object]) -> None:
+    result = runner.invoke(app, ["codex", "openai", "list", "--json"])
+    assert result.exit_code == 0
+    assert stub_provider["ref"] == ("codex", "openai")
+    assert stub_provider["store"].calls == [("list_accounts", {"json_output": True})]
+    assert json.loads(result.stdout)["schemaVersion"] == 1
+
+
+def test_codex_add_with_label_and_slot(stub_provider: dict[str, object]) -> None:
+    result = runner.invoke(
+        app, ["codex", "openai", "add", "--label", "work", "--slot", "2"]
+    )
+    assert result.exit_code == 0
+    assert stub_provider["store"].calls == [("add_account", {"label": "work", "slot": 2})]
+
+
+def test_codex_switch_positional_and_to_flag(stub_provider: dict[str, object]) -> None:
+    assert runner.invoke(app, ["codex", "openai", "switch", "2"]).exit_code == 0
+    assert runner.invoke(app, ["codex", "openai", "switch", "--to", "work"]).exit_code == 0
+    assert runner.invoke(app, ["codex", "openai", "switch"]).exit_code == 0  # rotate
+    assert stub_provider["store"].calls == [
+        ("switch", {"identifier": "2", "json_output": False}),
+        ("switch", {"identifier": "work", "json_output": False}),
+        ("switch", {"identifier": None, "json_output": False}),
+    ]
+
+
+def test_codex_remove(stub_provider: dict[str, object]) -> None:
+    assert runner.invoke(app, ["codex", "openai", "remove", "2"]).exit_code == 0
+    assert stub_provider["store"].calls == [("remove_account", {"identifier": "2"})]
+
+
+def test_opencode_switch_is_refused(temp_home: Path) -> None:
+    # Real registry + real store: snapshot-refused providers error before
+    # touching any account state. Note: on click versions that separate
+    # stderr, check result.stderr instead of result.output for the message.
+    result = runner.invoke(app, ["opencode", "openai", "switch", "1"])
+    assert result.exit_code == 1
+    assert "cannot safely restore" in result.output
+
+
+def test_opencode_verbs_exist(stub_provider: dict[str, object]) -> None:
+    result = runner.invoke(app, ["opencode", "openai", "list"])
+    assert result.exit_code == 0
+    assert stub_provider["ref"] == ("opencode", "openai")
