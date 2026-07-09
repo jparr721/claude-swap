@@ -53,9 +53,6 @@ _SUBCOMMAND_FLAGS = {
     "purge": "--purge",
     "upgrade": "--upgrade",
     "update": "--upgrade",
-    "tui": "--tui",
-    "watch": "--watch",
-    "menubar": "--menubar",
 }
 
 
@@ -656,12 +653,6 @@ def main() -> None:
         _config_command(sys.argv[2:])
         return
 
-    # Bare `cswap` in an interactive terminal opens the TUI dashboard (like
-    # lazygit/k9s). TTY-gated on both ends so scripts and pipes keep getting
-    # the usage error, and `cswap tui` stays the explicit spelling.
-    if not argv and sys.stdout.isatty() and sys.stdin.isatty():
-        argv = ["--tui"]
-
     # Memorable subcommands (`cswap switch <email>`, `cswap list`, `cswap help`, ...)
     # are rewritten to the equivalent flags so the original `--flag` interface
     # keeps working unchanged.
@@ -694,9 +685,6 @@ Commands:
   %(prog)s config [set KEY VALUE]     show or change settings (settings.json)
   %(prog)s export <path>              export accounts
   %(prog)s import <path>              import accounts
-  %(prog)s tui                        interactive dashboard (also: bare %(prog)s)
-  %(prog)s watch                      dashboard, opened on the live watch page
-  %(prog)s menubar                    macOS menu bar app
   %(prog)s upgrade                    self-upgrade to latest
   %(prog)s purge                      remove all claude-swap data
 
@@ -845,21 +833,6 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         help=argparse.SUPPRESS,
     )
     group.add_argument(
-        "--tui",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    group.add_argument(
-        "--watch",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    group.add_argument(
-        "--menubar",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    group.add_argument(
         "--upgrade",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -884,9 +857,6 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         or args.switch
         or args.status
         or args.purge
-        or args.tui
-        or args.watch
-        or args.menubar
         or args.upgrade
         or args.remove_account is not None
         or args.switch_to is not None
@@ -1022,27 +992,6 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
             from claude_swap.transfer import import_accounts
 
             import_accounts(switcher, args.import_, force=args.force)
-        elif args.tui:
-            from claude_swap.tui import run as tui_run
-
-            sys.exit(tui_run(switcher))
-        elif args.watch:
-            from claude_swap.tui import run as tui_run
-
-            sys.exit(tui_run(switcher, start="watch"))
-        elif args.menubar:
-            if sys.platform != "darwin":
-                error("The menu bar is only available on macOS.")
-                sys.exit(1)
-            try:
-                from claude_swap.menubar import run as menubar_run
-            except ImportError:
-                error(
-                    "Menu bar mode requires 'rumps'. "
-                    "Install with: pip install 'claude-swap[menubar]'"
-                )
-                sys.exit(1)
-            sys.exit(menubar_run(switcher))
     except ClaudeSwitchError as e:
         # In JSON mode keep stdout pure JSON: emit the structured error envelope
         # there (exit 1) instead of a red stderr line.

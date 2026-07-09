@@ -42,8 +42,8 @@ jobs:
         run: uv sync
 
       - name: Run tests
-        # Includes the TUI tests: the Textual TUI (unlike the old curses one)
-        # runs on stock Windows, and this job is the proof.
+        # Proves the Windows-specific credential and session paths (keyring
+        # backend, file locking, path handling) work on stock Windows.
         run: uv run pytest
 
   macos-keychain:

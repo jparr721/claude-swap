@@ -45,8 +45,6 @@ from claude_swap.credentials import (  # noqa: F401  (constants re-exported for 
 from claude_swap.locking import FileLock
 from claude_swap.logging_config import setup_logging
 from claude_swap.models import (
-    AccountSnapshot,
-    AccountsSnapshot,
     Platform,
     SwitchTransaction,
     get_timestamp,
@@ -580,58 +578,6 @@ class ClaudeAccountSwitcher:
         """
         accounts_info = self._build_accounts_info()
         return self._collect_usage_entries(accounts_info, fetch=fetch)
-
-    def accounts_snapshot(self, fetch: set[str] | None = None) -> AccountsSnapshot:
-        """One-pass structured snapshot of every managed account, for the TUI.
-
-        Metadata, active-slot detection, and usage entries all come from a
-        single ``_build_accounts_info`` + ``_collect_usage_entries`` pass, so
-        the view is coherent — two separate calls could interleave with other
-        collectors and disagree about the active slot or freshness. ``fetch``
-        has ``_collect_usage_entries`` semantics: ``None`` makes every stale
-        account eligible; a set restricts which accounts *may* be fetched
-        this pass.
-        """
-        accounts_info = self._build_accounts_info()
-        entries = self._collect_usage_entries(accounts_info, fetch=fetch)
-        active_number: str | None = None
-        accounts: list[AccountSnapshot] = []
-        for num, email, org_name, org_uuid, is_active, _creds in accounts_info:
-            n = str(num)
-            if is_active:
-                active_number = n
-            accounts.append(
-                AccountSnapshot(
-                    number=n,
-                    email=email,
-                    org_name=org_name,
-                    org_uuid=org_uuid,
-                    is_active=is_active,
-                    kind=self._account_kind(n),
-                    switchable=self._account_is_switchable(n),
-                    usage=entries[n],
-                )
-            )
-        return AccountsSnapshot(
-            active_number=active_number,
-            accounts=tuple(accounts),
-            taken_at=self._usage_store.clock(),
-        )
-
-    def usage_fetch_stamps(self) -> dict[str, float | None]:
-        """Per-slot ``fetchedAt`` snapshot from the usage store — a pure file
-        read (no fetching, no credential access). The TUI watch view diffs
-        consecutive snapshots to flash rows whose usage just refreshed.
-        """
-        data = self._get_sequence_data() or {}
-        identities = {
-            num: (info.get("email", ""), info.get("organizationUuid", "") or "")
-            for num, info in data.get("accounts", {}).items()
-        }
-        return {
-            num: entry.fetched_at
-            for num, entry in self._usage_store.entries(identities).items()
-        }
 
     def set_usage_poll_plan(
         self, plans: dict[str, tuple[float | None, float | None]]
@@ -1911,16 +1857,11 @@ class ClaudeAccountSwitcher:
         self,
         show_token_status: bool = False,
         json_output: bool = False,
-        fetch: set[str] | None = None,
     ) -> dict | None:
         """List all managed accounts.
 
         In ``json_output`` mode, returns the schema-v1 payload (printing nothing)
         for the CLI to serialize; otherwise prints the human view and returns None.
-
-        ``fetch`` restricts which accounts *may* be fetched this pass (the TUI
-        watch view's adaptive set); ``None`` — the CLI default — leaves every
-        stale account eligible.
         """
         if not self.sequence_file.exists():
             # JSON mode must never prompt — emit an empty list instead of the
@@ -1936,7 +1877,7 @@ class ClaudeAccountSwitcher:
             return None
 
         accounts_info = self._build_accounts_info()
-        entries = self._collect_usage_entries(accounts_info, fetch=fetch)
+        entries = self._collect_usage_entries(accounts_info, fetch=None)
 
         if json_output:
             return self._build_list_payload(accounts_info, entries)
@@ -1944,10 +1885,6 @@ class ClaudeAccountSwitcher:
         print(bolded("Accounts:"))
         for i, (num, email, org_name, org_uuid, is_active, _) in enumerate(accounts_info):
             tag = self._get_display_tag(email, org_name, org_uuid)
-            # NOTE: the TUI watch view (tui._watch_account_rows) parses this
-            # output to map rows to accounts for quick-switch: it relies on the
-            # uncolored ``  {num}: `` prefix and the ``(active)`` marker below.
-            # Keep them intact when tweaking this line, or update that parser.
             if is_active:
                 marker = f" {bold_accent('(active)')}"
                 print(f"  {num}: {email} {muted(f'[{tag}]')}{marker}")

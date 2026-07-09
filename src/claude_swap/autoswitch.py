@@ -1,11 +1,10 @@
 """Auto-switch engine: poll usage, switch accounts before they hit rate limits.
 
-``AutoSwitchEngine`` is UI-agnostic — no printing, no argparse, no TUI
-imports. It composes a :class:`ClaudeAccountSwitcher`, evaluates a threshold
-policy each :meth:`~AutoSwitchEngine.tick`, and reports everything through
-typed events handed to an ``on_event`` callback; the CLI renders them as
-human lines or JSONL, and any future frontend (TUI dashboard, menubar) can
-consume the same stream.
+``AutoSwitchEngine`` is UI-agnostic — no printing, no argparse imports. It
+composes a :class:`ClaudeAccountSwitcher`, evaluates a threshold policy each
+:meth:`~AutoSwitchEngine.tick`, and reports everything through typed events
+handed to an ``on_event`` callback; the CLI renders them as human lines or
+JSONL, and any future frontend can consume the same stream.
 
 Policy in one paragraph: when the active account's *binding window* (the
 higher of its 5h/7d utilization) crosses ``settings.threshold``, switch to
