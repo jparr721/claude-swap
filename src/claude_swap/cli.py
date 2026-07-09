@@ -6,6 +6,9 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Callable
+
+import typer
 
 from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError
@@ -13,6 +16,317 @@ from claude_swap.json_output import error_envelope, provider_envelope
 from claude_swap.printer import dimmed, error, force_utf8_output, muted
 from claude_swap.providers.registry import get_provider, managed_aggregate_providers
 from claude_swap.switcher import ClaudeAccountSwitcher
+
+app = typer.Typer(
+    help="Multi-Account Switcher for Claude Code",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        print(f"{_prog_name()} {__version__}")
+        raise typer.Exit(0)
+
+
+@app.callback()
+def _root(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show the version and exit",
+    ),
+) -> None:
+    """Multi-Account Switcher for Claude Code."""
+
+
+def _init_switcher(debug: bool) -> ClaudeAccountSwitcher:
+    """Construct the switcher and enforce the root-user guard (POSIX only)."""
+    switcher = ClaudeAccountSwitcher(debug=debug)
+    if sys.platform != "win32":
+        if os.geteuid() == 0 and not switcher._is_running_in_container():
+            error("Error: Do not run this script as root (unless running in a container)")
+            raise typer.Exit(1)
+    return switcher
+
+
+def _update_check_note() -> None:
+    from claude_swap.update_check import check_for_update
+
+    msg = check_for_update(__version__)
+    if msg:
+        print(f"\n{muted(msg)}", file=sys.stderr)
+
+
+def _dispatch(
+    action: Callable[[], dict | None], json_mode: bool, update_check: bool
+) -> None:
+    """Run a command body under the standard error contract.
+
+    JSON mode keeps stdout pure: handled errors emit the structured envelope
+    there (exit 1) and the Ctrl-C note goes to stderr (exit 130). The CLI is
+    the single serialization point - command bodies return payload dicts and
+    never print JSON themselves.
+    """
+    try:
+        payload = action()
+    except ClaudeSwitchError as e:
+        if json_mode:
+            print(json.dumps(error_envelope(e), indent=2))
+        else:
+            error(f"Error: {e}")
+        raise typer.Exit(1) from e
+    except KeyboardInterrupt:
+        print(
+            f"\n{dimmed('Operation cancelled')}",
+            file=sys.stderr if json_mode else sys.stdout,
+        )
+        raise typer.Exit(130) from None
+    if json_mode and payload is not None:
+        print(json.dumps(payload, indent=2))
+    if update_check and not json_mode:
+        _update_check_note()
+
+
+def _aggregate_list(
+    switcher: ClaudeAccountSwitcher, json_mode: bool, token_status: bool
+) -> dict | None:
+    """Claude listing plus every managed provider's section.
+
+    Provider sections are auxiliary: their state living in separate trees must
+    never fail the primary Claude listing. In JSON mode returns the schema-v2
+    provider envelope with per-provider errors embedded.
+    """
+    payload = switcher.list_accounts(
+        show_token_status=token_status,
+        json_output=json_mode,
+    )
+    provider_payloads: dict[str, dict[str, dict]] | None = None
+    if json_mode:
+        provider_payloads = {"claude": {"default": payload or {}}}
+    for provider_store in managed_aggregate_providers():
+        provider_ref = provider_store.definition.ref
+        try:
+            provider_payload = provider_store.list_accounts(json_output=True)
+            if json_mode:
+                provider_payloads.setdefault(provider_ref.frontend, {})[
+                    provider_ref.backend
+                ] = provider_payload or {}
+            elif provider_payload is not None and provider_payload["accounts"]:
+                print()
+                provider_store.list_accounts(json_output=False)
+        except ClaudeSwitchError as provider_err:
+            if json_mode:
+                provider_payloads.setdefault(provider_ref.frontend, {})[
+                    provider_ref.backend
+                ] = {
+                    "error": {
+                        "type": provider_err.__class__.__name__,
+                        "message": str(provider_err),
+                    }
+                }
+            else:
+                print(
+                    dimmed(
+                        f"{provider_store.definition.frontend.display_name} "
+                        f"accounts unavailable: {provider_err}"
+                    ),
+                    file=sys.stderr,
+                )
+    if json_mode and provider_payloads is not None:
+        return provider_envelope(provider_payloads)
+    return payload
+
+
+@app.command("ls")
+def ls_command(
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON to stdout"
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Read-only account overview across all providers."""
+    _dispatch(
+        lambda: _aggregate_list(
+            _init_switcher(debug), json_mode=json_output, token_status=False
+        ),
+        json_mode=json_output,
+        update_check=True,
+    )
+
+
+def _run_upgrade() -> None:
+    # Self-upgrade runs before switcher init so we don't touch config/keychain
+    # just to upgrade the tool itself.
+    from claude_swap.update_check import run_self_upgrade
+
+    try:
+        raise typer.Exit(run_self_upgrade())
+    except KeyboardInterrupt:
+        print(f"\n{dimmed('Upgrade cancelled')}")
+        raise typer.Exit(130) from None
+
+
+@app.command("upgrade")
+def upgrade_command() -> None:
+    """Self-upgrade claude-swap to the latest release."""
+    _run_upgrade()
+
+
+@app.command("update", hidden=True)
+def update_command() -> None:
+    """Alias of upgrade."""
+    _run_upgrade()
+
+
+@app.command("purge")
+def purge_command(
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Remove all claude-swap data from this machine."""
+
+    def action() -> None:
+        _init_switcher(debug).purge()
+
+    _dispatch(action, json_mode=False, update_check=False)
+
+
+config_app = typer.Typer(
+    help="Read and edit claude-swap settings (settings.json in the backup root)."
+)
+app.add_typer(config_app, name="config")
+
+
+def _config_list_body(json_mode: bool, debug: bool) -> None:
+    from claude_swap.settings import effective_settings, format_setting_value, settings_path
+
+    def action() -> None:
+        root = _init_switcher(debug).backup_dir
+        rows = effective_settings(root)
+        if json_mode:
+            print(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "path": str(settings_path(root)),
+                        "settings": [
+                            {"key": spec.dotted, "value": value, "isSet": is_set}
+                            for spec, value, is_set in rows
+                        ],
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            key_w = max(len(spec.dotted) for spec, _, _ in rows)
+            val_w = max(len(format_setting_value(v)) for _, v, _ in rows)
+            for spec, value, is_set in rows:
+                line = f"{spec.dotted:<{key_w}}  {format_setting_value(value):<{val_w}}"
+                print(line if is_set else f"{line}  {dimmed('(default)')}")
+
+    _dispatch(action, json_mode=json_mode, update_check=False)
+
+
+@config_app.callback(invoke_without_command=True)
+def config_main(
+    ctx: typer.Context,
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON to stdout"
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Read and edit claude-swap settings."""
+    if ctx.invoked_subcommand is None:
+        _config_list_body(json_output, debug)
+
+
+@config_app.command("list")
+def config_list(
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON to stdout"
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Show all effective settings (the default)."""
+    _config_list_body(json_output, debug)
+
+
+@config_app.command("get")
+def config_get(
+    key: str = typer.Argument(..., metavar="KEY"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON to stdout"
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Print one setting's effective value."""
+    from claude_swap.settings import effective_settings, format_setting_value, setting_spec
+
+    def action() -> None:
+        root = _init_switcher(debug).backup_dir
+        spec = setting_spec(key)
+        value, is_set = next((v, s) for sp, v, s in effective_settings(root) if sp is spec)
+        if json_output:
+            print(
+                json.dumps(
+                    {"schemaVersion": 1, "key": spec.dotted, "value": value, "isSet": is_set},
+                    indent=2,
+                )
+            )
+        else:
+            print(format_setting_value(value))
+
+    _dispatch(action, json_mode=json_output, update_check=False)
+
+
+@config_app.command("set")
+def config_set(
+    key: str = typer.Argument(..., metavar="KEY"),
+    value: str = typer.Argument(..., metavar="VALUE"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Validate and persist one setting."""
+    from claude_swap.settings import format_setting_value, set_setting
+
+    def action() -> None:
+        stored = set_setting(_init_switcher(debug).backup_dir, key, value)
+        print(f"{key} = {format_setting_value(stored)}")
+
+    _dispatch(action, json_mode=False, update_check=False)
+
+
+@config_app.command("unset")
+def config_unset(
+    key: str = typer.Argument(..., metavar="KEY"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Remove one setting (revert to the default)."""
+    from claude_swap.settings import format_setting_value, setting_spec, unset_setting
+
+    def action() -> None:
+        if unset_setting(_init_switcher(debug).backup_dir, key):
+            default = setting_spec(key).default
+            print(f"{key} unset (default: {format_setting_value(default)})")
+        else:
+            print(muted(f"{key} is not set; nothing to do"), file=sys.stderr)
+
+    _dispatch(action, json_mode=False, update_check=False)
+
+
+@config_app.command("path")
+def config_path(
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Print the settings.json location."""
+    from claude_swap.settings import settings_path
+
+    def action() -> None:
+        print(settings_path(_init_switcher(debug).backup_dir))
+
+    _dispatch(action, json_mode=False, update_check=False)
 
 
 def _prog_name() -> str:
@@ -933,47 +1247,9 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         elif args.remove_account:
             switcher.remove_account(args.remove_account)
         elif args.list:
-            payload = switcher.list_accounts(
-                show_token_status=args.token_status,
-                json_output=args.json,
+            payload = _aggregate_list(
+                switcher, json_mode=args.json, token_status=args.token_status
             )
-            # Provider sections are auxiliary: their state living in separate
-            # trees must never fail the primary Claude listing.
-            provider_payloads: dict[str, dict[str, dict]] | None = None
-            if args.json:
-                provider_payloads = {"claude": {"default": payload or {}}}
-            for provider_store in managed_aggregate_providers():
-                try:
-                    provider_payload = provider_store.list_accounts(json_output=True)
-                    provider_ref = provider_store.definition.ref
-                    if args.json:
-                        provider_payloads.setdefault(provider_ref.frontend, {})[
-                            provider_ref.backend
-                        ] = provider_payload or {}
-                    elif provider_payload is not None and provider_payload["accounts"]:
-                        print()
-                        provider_store.list_accounts(json_output=False)
-                except ClaudeSwitchError as provider_err:
-                    if args.json:
-                        provider_ref = provider_store.definition.ref
-                        provider_payloads.setdefault(provider_ref.frontend, {})[
-                            provider_ref.backend
-                        ] = {
-                            "error": {
-                                "type": provider_err.__class__.__name__,
-                                "message": str(provider_err),
-                            }
-                        }
-                    else:
-                        print(
-                            dimmed(
-                                f"{provider_store.definition.frontend.display_name} "
-                                f"accounts unavailable: {provider_err}"
-                            ),
-                            file=sys.stderr,
-                        )
-            if args.json and provider_payloads is not None:
-                payload = provider_envelope(provider_payloads)
         elif args.switch:
             payload = switcher.switch(strategy=args.strategy, json_output=args.json)
         elif args.switch_to:
