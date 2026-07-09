@@ -103,20 +103,30 @@ class TestCLI:
         assert "cswap claude default list" in result.stdout
         assert "cswap codex openai list" in result.stdout
         assert "cswap opencode openai list" in result.stdout
-        assert "cswap codex openai switch --to" not in result.stdout
+        assert "cswap codex openai switch --to" in result.stdout
         assert "cswap opencode openai switch --to" not in result.stdout
 
-    def test_openai_provider_help_does_not_advertise_switch_target(self):
-        for frontend in ["codex", "opencode"]:
-            result = subprocess.run(
-                [sys.executable, "-m", "claude_swap", frontend, "openai", "--help"],
-                capture_output=True,
-                text=True,
-                env=_subprocess_env(),
-            )
+    def test_codex_provider_help_advertises_switch_target(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "claude_swap", "codex", "openai", "--help"],
+            capture_output=True,
+            text=True,
+            env=_subprocess_env(),
+        )
 
-            assert result.returncode == 0
-            assert "--to" not in result.stdout
+        assert result.returncode == 0
+        assert "--to" in result.stdout
+
+    def test_opencode_provider_help_still_hides_switch_target(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "claude_swap", "opencode", "openai", "--help"],
+            capture_output=True,
+            text=True,
+            env=_subprocess_env(),
+        )
+
+        assert result.returncode == 0
+        assert "--to" not in result.stdout
 
     def test_no_args_shows_error(self):
         """Test that running without args (non-TTY) shows a clean no-command error."""

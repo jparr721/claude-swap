@@ -126,6 +126,11 @@ def _translate_provider_subcommand(argv: list[str]) -> list[str]:
 
 def _provider_command(frontend: str, backend: str, argv: list[str]) -> None:
     """Handle provider auth switching commands."""
+    try:
+        provider = get_provider(frontend, backend)
+    except KeyError as exc:
+        error(f"Error: {exc}")
+        sys.exit(1)
     parser = argparse.ArgumentParser(
         prog=f"{_prog_name()} {frontend} {backend}",
         description=f"Manage {frontend}/{backend} auth snapshots.",
@@ -133,7 +138,7 @@ def _provider_command(frontend: str, backend: str, argv: list[str]) -> None:
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     parser.add_argument("--label", metavar="LABEL", help="Display label for the account")
     parser.add_argument("--slot", type=int, metavar="NUM", help="Store in a specific slot")
-    switch_help = argparse.SUPPRESS if backend == "openai" else None
+    switch_help = None if provider.definition.switch_mode == "symlink" else argparse.SUPPRESS
     parser.add_argument(
         "--to",
         dest="switch_to_alias",
@@ -164,7 +169,6 @@ def _provider_command(frontend: str, backend: str, argv: list[str]) -> None:
     json_mode = bool(getattr(args, "json", False))
     payload: dict | None = None
     try:
-        provider = get_provider(frontend, backend)
         if args.add_account:
             provider.add_account(label=args.label, slot=args.slot)
         elif args.list:
@@ -177,13 +181,6 @@ def _provider_command(frontend: str, backend: str, argv: list[str]) -> None:
             payload = provider.switch(args.switch_to, json_output=args.json)
         elif args.remove_account is not None:
             provider.remove_account(args.remove_account)
-    except KeyError as exc:
-        err = ConfigError(str(exc))
-        if json_mode:
-            print(json.dumps(error_envelope(err), indent=2))
-        else:
-            error(f"Error: {err}")
-        sys.exit(1)
     except ClaudeSwitchError as e:
         if json_mode:
             print(json.dumps(error_envelope(e), indent=2))
@@ -692,6 +689,7 @@ Commands:
   %(prog)s run <num|email> [-- ...]   run as an account, this terminal only
   %(prog)s auto                       auto-switch when nearing rate limits
   %(prog)s codex openai list          list Codex OpenAI accounts
+  %(prog)s codex openai switch --to N switch Codex OpenAI auth
   %(prog)s opencode openai list       list opencode OpenAI accounts
   %(prog)s config [set KEY VALUE]     show or change settings (settings.json)
   %(prog)s export <path>              export accounts
