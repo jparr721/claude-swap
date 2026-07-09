@@ -1,1155 +1,788 @@
-"""Tests for the CLI module."""
+"""Tests for the Typer command tree (drives `cli.app` via CliRunner)."""
 
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, call, patch
 
 import pytest
+from typer.testing import CliRunner
 
-from claude_swap import __version__
-from claude_swap import cli
+from claude_swap.cli import app
 
-# src layout: ensure subprocess can find claude_swap
-_SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
-
-# A throwaway HOME for subprocesses. The in-process autouse Keychain/HOME guards
-# do NOT reach child processes, so a spawned ``python -m claude_swap`` would
-# otherwise resolve to the developer's real ``~/.claude-swap-backup`` and run the
-# data migration against real accounts (touching the real Keychain on macOS). An empty,
-# isolated HOME has no ``sequence.json`` → the migration skips before any Keychain
-# access, and no ``.claude.json`` → no account to read.
-_ISOLATED_HOME = tempfile.mkdtemp(prefix="cswap-subproc-home-")
+runner = CliRunner()
 
 
-def _subprocess_env(**extra: str) -> dict[str, str]:
-    """Build env dict with PYTHONPATH pointing at src/ and an isolated HOME.
-
-    HOME/USERPROFILE default to a throwaway dir so the spawned CLI never touches
-    the developer's real backup dir or Keychain; callers may still override HOME
-    explicitly (e.g. ``_subprocess_env(HOME=str(temp_home))``), in which case
-    USERPROFILE mirrors it unless the caller set USERPROFILE too.
-    """
-    env = {**os.environ, **extra}
-    env["PYTHONPATH"] = _SRC_DIR + os.pathsep + env.get("PYTHONPATH", "")
-    if "HOME" not in extra:
-        env["HOME"] = _ISOLATED_HOME
-        env["USERPROFILE"] = _ISOLATED_HOME
-    elif "USERPROFILE" not in extra:
-        env["USERPROFILE"] = extra["HOME"]
-    # CLAUDE_CONFIG_DIR / CODEX_HOME / XDG_DATA_HOME bypass HOME in path resolution, so a
-    # developer with any exported would otherwise point the spawned CLI back
-    # at real config/auth/backup paths (and on macOS, the real Keychain). Drop them
-    # unless a caller set them deliberately.
-    for var in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "OPENCODE_DATA_HOME", "XDG_DATA_HOME"):
-        if var not in extra:
-            env.pop(var, None)
-    return env
+@pytest.fixture(autouse=True)
+def _no_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "claude_swap.update_check.check_for_update", lambda version: None
+    )
 
 
-class TestCLI:
-    """Test CLI argument parsing and execution."""
+class _StubSwitcher:
+    """Signature-compatible stand-in recording every dispatched call."""
 
-    def test_version_flag(self):
-        """Test --version flag."""
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--version"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
+    last: "_StubSwitcher | None" = None
+    backup_dir_override: Path | None = None
+
+    def __init__(self, debug: bool = False) -> None:
+        self.debug = debug
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.backup_dir = _StubSwitcher.backup_dir_override or Path(
+            "/nonexistent-backup-root"
         )
-        assert result.returncode == 0
-        assert __version__ in result.stdout
+        _StubSwitcher.last = self
 
-    def test_help_flag(self):
-        """Test --help flag."""
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--help"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
+    def _is_running_in_container(self) -> bool:
+        return False
+
+    def list_accounts(
+        self, show_token_status: bool = False, json_output: bool = False
+    ) -> dict | None:
+        self.calls.append(
+            ("list_accounts", {"show_token_status": show_token_status, "json_output": json_output})
         )
-        assert result.returncode == 0
-        assert "Multi-Account Switcher" in result.stdout
-        # Bare subcommands are the documented interface and lead the help.
-        assert "cswap add" in result.stdout or "add " in result.stdout
-        assert "switch <num|email>" in result.stdout
-        assert "list " in result.stdout
-        assert "status " in result.stdout
-        # The legacy `--flag` spellings still work but are hidden from the
-        # options section; only the "keep working" note may mention them.
-        options_section = result.stdout.split("Flags combine with subcommands:")[0]
-        assert "--add-account" not in options_section
-        assert "--switch " not in options_section
-        assert "--list" not in options_section
-        assert "--status" not in options_section
-        # ...and the note that they keep working is still present.
-        assert "keep working" in result.stdout
+        if json_output:
+            return {"schemaVersion": 1, "activeAccountNumber": None, "accounts": []}
+        print("Accounts:")
+        return None
 
-    def test_help_mentions_provider_first_commands(self):
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--help"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
+    def purge(self) -> None:
+        self.calls.append(("purge", {}))
+
+    def status(self, json_output: bool = False) -> dict | None:
+        self.calls.append(("status", {"json_output": json_output}))
+        return {"schemaVersion": 1, "active": None} if json_output else None
+
+    def add_account(self, slot: int | None = None, assume_yes: bool = False) -> None:
+        self.calls.append(("add_account", {"slot": slot}))
+
+    def add_account_from_token(
+        self,
+        token: str,
+        email: str | None = None,
+        slot: int | None = None,
+        assume_yes: bool = False,
+    ) -> None:
+        self.calls.append(
+            ("add_account_from_token", {"token": token, "email": email, "slot": slot})
         )
 
-        assert result.returncode == 0
-        assert "cswap claude default list" in result.stdout
-        assert "cswap codex openai list" in result.stdout
-        assert "cswap opencode openai list" in result.stdout
-        assert "cswap codex openai switch --to" in result.stdout
-        assert "cswap opencode openai switch --to" not in result.stdout
+    def switch(self, strategy: str | None = None, json_output: bool = False) -> dict | None:
+        self.calls.append(("switch", {"strategy": strategy, "json_output": json_output}))
+        return {"schemaVersion": 1, "switched": True} if json_output else None
 
-    def test_codex_provider_help_advertises_switch_target(self):
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "codex", "openai", "--help"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
+    def switch_to(
+        self, identifier: str, json_output: bool = False, force: bool = False
+    ) -> dict | None:
+        self.calls.append(
+            ("switch_to", {"identifier": identifier, "json_output": json_output, "force": force})
         )
+        return {"schemaVersion": 1, "switched": True} if json_output else None
 
-        assert result.returncode == 0
-        assert "--to" in result.stdout
-
-    def test_opencode_provider_help_still_hides_switch_target(self):
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "opencode", "openai", "--help"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
-        )
-
-        assert result.returncode == 0
-        assert "--to" not in result.stdout
-
-    def test_no_args_shows_error(self):
-        """Test that running without args (non-TTY) shows a clean no-command error."""
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
-        )
-        assert result.returncode == 2
-        assert "no command given" in result.stderr
-        # The now-hidden legacy flags must not leak into the error.
-        assert "--add-account" not in result.stderr
-        assert "one of the arguments" not in result.stderr
-
-    def test_mutually_exclusive_args(self):
-        """Test that mutually exclusive args are enforced."""
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--list", "--status"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
-        )
-        assert result.returncode != 0
-        assert "not allowed" in result.stderr.lower()
-
-    def test_debug_flag_accepted(self):
-        """Test that --debug flag is accepted."""
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--debug", "--status"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
-        )
-        # Should run (may fail due to no config, but flag should be accepted)
-        assert "--debug" not in result.stderr or "unrecognized" not in result.stderr
-
-    def test_subprocess_env_clears_codex_home(self):
-        with patch.dict(os.environ, {"CODEX_HOME": "/real/codex"}):
-            env = _subprocess_env()
-
-        assert "CODEX_HOME" not in env
-
-    def test_token_status_flag_requires_list(self, capsys):
-        """--token-status should only be accepted alongside --list."""
-        with patch.object(sys, "argv", ["claude-swap", "--token-status", "--status"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-
-        assert excinfo.value.code == 2
-        assert "--token-status can only be used with 'list'" in capsys.readouterr().err
-
-    def test_token_status_flag_is_forwarded_to_list(self):
-        """--list --token-status should call list_accounts(show_token_status=True)."""
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "--list", "--token-status"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            cli.main()
-
-        switcher_cls.return_value.list_accounts.assert_called_once_with(
-            show_token_status=True,
-            json_output=False,
-        )
-
-    def test_strategy_best_requires_switch(self, capsys):
-        """--strategy should only be accepted alongside --switch."""
-        with patch.object(sys, "argv", ["claude-swap", "--strategy", "best", "--list"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-
-        assert excinfo.value.code == 2
-        assert "--strategy can only be used with bare 'switch'" in capsys.readouterr().err
-
-    def test_strategy_next_available_requires_switch(self, capsys):
-        """--strategy next-available should only be accepted alongside --switch."""
-        with patch.object(sys, "argv", ["claude-swap", "--strategy", "next-available", "--list"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-
-        assert excinfo.value.code == 2
-        assert "--strategy can only be used with bare 'switch'" in capsys.readouterr().err
-
-    def test_strategy_rejects_unknown_value(self, capsys):
-        """argparse rejects strategies outside the known choices."""
-        with patch.object(sys, "argv", ["claude-swap", "--switch", "--strategy", "bogus"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-
-        assert excinfo.value.code == 2
-
-    def test_switch_strategy_forwarded(self):
-        """--switch --strategy best forwards the strategy to switch()."""
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "--switch", "--strategy", "best"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            cli.main()
-
-        switcher_cls.return_value.switch.assert_called_once_with(
-            strategy="best", json_output=False
-        )
-
-    def test_plain_switch_passes_no_strategy(self):
-        """Bare --switch forwards strategy=None."""
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "--switch"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            cli.main()
-
-        switcher_cls.return_value.switch.assert_called_once_with(
-            strategy=None, json_output=False
-        )
-
-    def test_slot_flag_requires_add_account(self, capsys):
-        """--slot should only be accepted alongside --add-account or --add-token."""
-        with patch.object(sys, "argv", ["claude-swap", "--list", "--slot", "3"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-
-        assert excinfo.value.code == 2
-        assert "--slot can only be used with 'add' or 'add-token'" in capsys.readouterr().err
-
-    def test_slot_flag_in_help(self):
-        """--slot should appear in help output."""
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--help"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
-        )
-        assert "--slot" in result.stdout
-
-    def test_account_flag_requires_export(self, capsys):
-        """--account should only be accepted alongside --export."""
-        with patch.object(
-            sys, "argv", ["claude-swap", "--list", "--account", "1"]
-        ):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-        assert excinfo.value.code == 2
-        assert "--account can only be used with 'export'" in capsys.readouterr().err
-
-    def test_force_flag_requires_import_or_switch_to(self, capsys):
-        """--force should only be accepted alongside --import or --switch-to."""
-        with patch.object(sys, "argv", ["claude-swap", "--list", "--force"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-        assert excinfo.value.code == 2
-        assert (
-            "--force can only be used with 'import' or 'switch <num|email>'"
-            in capsys.readouterr().err
-        )
-
-    def test_switch_to_force_forwarded(self):
-        """--switch-to 2 --force forwards force=True to switch_to()."""
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "--switch-to", "2", "--force"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            cli.main()
-
-        switcher_cls.return_value.switch_to.assert_called_once_with(
-            "2", json_output=False, force=True
-        )
-
-    def test_switch_to_without_force_forwards_false(self):
-        """Plain --switch-to forwards force=False."""
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "--switch-to", "2"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            cli.main()
-
-        switcher_cls.return_value.switch_to.assert_called_once_with(
-            "2", json_output=False, force=False
-        )
-
-    def test_export_and_import_are_mutually_exclusive(self):
-        """--export and --import cannot be combined."""
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "claude_swap",
-                "--export",
-                "/tmp/x",
-                "--import",
-                "/tmp/x",
-            ],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
-        )
-        assert result.returncode != 0
-        assert "not allowed" in result.stderr.lower()
-
-    def test_export_in_help(self):
-        """The export/import subcommands should appear in help output."""
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--help"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
-        )
-        assert "export <path>" in result.stdout
-        assert "import <path>" in result.stdout
-
-    def test_export_dispatch_calls_transfer(self):
-        """--export dispatches into transfer.export_accounts."""
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch("claude_swap.transfer.export_accounts") as export_fn, \
-             patch.object(
-                 sys, "argv", ["claude-swap", "--export", "/tmp/x", "--account", "2"]
-             ), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            cli.main()
-        export_fn.assert_called_once_with(
-            switcher_cls.return_value, "/tmp/x", account="2", full=False
-        )
-
-    def test_full_flag_requires_export(self, capsys):
-        """--full should only be accepted alongside --export."""
-        with patch.object(sys, "argv", ["claude-swap", "--list", "--full"]):
-            with pytest.raises(SystemExit) as exc_info:
-                cli.main()
-        assert exc_info.value.code == 2
-        assert "--full can only be used with 'export'" in capsys.readouterr().err
-
-    def test_full_flag_dispatches_with_full_true(self):
-        """--export --full should pass full=True into export_accounts."""
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch("claude_swap.transfer.export_accounts") as export_fn, \
-             patch.object(
-                 sys, "argv", ["claude-swap", "--export", "/tmp/x", "--full"]
-             ), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            cli.main()
-        export_fn.assert_called_once_with(
-            switcher_cls.return_value, "/tmp/x", account=None, full=True
-        )
-
-    def test_import_dispatch_calls_transfer(self):
-        """--import dispatches into transfer.import_accounts."""
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch("claude_swap.transfer.import_accounts") as import_fn, \
-             patch.object(
-                 sys, "argv", ["claude-swap", "--import", "/tmp/x", "--force"]
-             ), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            cli.main()
-        import_fn.assert_called_once_with(
-            switcher_cls.return_value, "/tmp/x", force=True
-        )
-
-    def test_upgrade_in_help(self):
-        """The upgrade subcommand should appear in help output."""
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--help"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
-        )
-        assert "upgrade " in result.stdout
-
-    def test_upgrade_dispatches_without_constructing_switcher(self):
-        """--upgrade should call run_self_upgrade and skip switcher init."""
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch(
-                 "claude_swap.update_check.run_self_upgrade", return_value=0
-             ) as upgrade_fn, \
-             patch.object(sys, "argv", ["claude-swap", "--upgrade"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-
-        assert excinfo.value.code == 0
-        upgrade_fn.assert_called_once_with()
-        switcher_cls.assert_not_called()
-
-class TestCLICommands:
-    """Test individual CLI commands."""
-
-    def test_status_no_account(self, temp_home: Path):
-        """Test status command with no account."""
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--status"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(HOME=str(temp_home)),
-        )
-        # Should succeed even with no account
-        assert "No active Claude account" in result.stdout or result.returncode == 0
-
-    def test_list_no_accounts(self, temp_home: Path):
-        """Test list command with no accounts."""
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--list"],
-            capture_output=True,
-            text=True,
-            input="n\n",  # Answer 'n' to first-run prompt
-            env=_subprocess_env(HOME=str(temp_home)),
-        )
-        assert "No accounts" in result.stdout or "managed" in result.stdout.lower()
-
-    def test_add_token_without_email_dispatches_with_none(self, temp_home: Path, capsys):
-        """--add-token without --email should dispatch with email=None (defaulted by switcher)."""
-        from claude_swap.switcher import ClaudeAccountSwitcher
-
-        with patch.object(
-            sys, "argv", ["claude-swap", "--add-token", "sk-ant-oat01-abc"],
-        ), patch.object(
-            ClaudeAccountSwitcher, "add_account_from_token"
-        ) as mock_add:
-            cli.main()
-
-        mock_add.assert_called_once_with(
-            token="sk-ant-oat01-abc", email=None, slot=None
-        )
-
-    def test_email_without_add_token_errors(self, capsys):
-        """--email without --add-token should exit with a clear error."""
-        with patch.object(sys, "argv", ["claude-swap", "--list", "--email", "u@x.com"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-        assert excinfo.value.code == 2
-        assert "--email can only be used with 'add-token'" in capsys.readouterr().err
-
-    def test_add_token_dispatches_to_switcher(self, temp_home: Path, capsys):
-        """--add-token with --email should call add_account_from_token."""
-        from claude_swap.switcher import ClaudeAccountSwitcher
-
-        with patch.object(
-            sys, "argv",
-            ["claude-swap", "--add-token", "mytoken", "--email", "u@example.com"],
-        ), patch.object(
-            ClaudeAccountSwitcher, "add_account_from_token"
-        ) as mock_add:
-            cli.main()
-
-        mock_add.assert_called_once_with(
-            token="mytoken", email="u@example.com", slot=None
-        )
-
-    def test_add_token_with_slot(self, temp_home: Path, capsys):
-        """--add-token --slot should forward slot to add_account_from_token."""
-        from claude_swap.switcher import ClaudeAccountSwitcher
-
-        with patch.object(
-            sys, "argv",
-            ["claude-swap", "--add-token", "tok", "--email", "u@example.com", "--slot", "3"],
-        ), patch.object(
-            ClaudeAccountSwitcher, "add_account_from_token"
-        ) as mock_add:
-            cli.main()
-
-        mock_add.assert_called_once_with(
-            token="tok", email="u@example.com", slot=3
-        )
-
-    def test_add_token_in_help(self):
-        """The add-token subcommand and the still-visible --email modifier appear."""
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--help"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
-        )
-        assert "add-token [TOKEN|-]" in result.stdout
-        assert "--email" in result.stdout  # modifier flag stays visible
-
-
-class TestRunCommand:
-    """`cswap run` pre-dispatch: parsing, forwarding, and dispatch."""
-
-    def _dispatch(self, argv: list[str]):
-        """Run cli.main() with a fake SessionManager; returns recorded calls."""
-        calls = []
-
-        class FakeSessionManager:
-            def __init__(self, switcher):
-                calls.append(("init", switcher))
-
-            def run(self, identifier, claude_args, share=True, share_history=False):
-                calls.append(("run", identifier, claude_args, share, share_history))
-
-        with patch("claude_swap.session.SessionManager", FakeSessionManager), \
-             patch("claude_swap.cli.ClaudeAccountSwitcher"), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch.object(sys, "argv", ["claude-swap", *argv]):
-            cli.main()
-        return calls
-
-    def test_run_dispatches_with_defaults(self):
-        calls = self._dispatch(["run", "2"])
-        assert ("run", "2", [], True, False) in calls
-
-    def test_run_by_email(self):
-        calls = self._dispatch(["run", "user@example.com"])
-        assert ("run", "user@example.com", [], True, False) in calls
-
-    def test_no_share_flag(self):
-        calls = self._dispatch(["run", "2", "--no-share"])
-        assert ("run", "2", [], False, False) in calls
-
-    def test_share_history_flag(self):
-        calls = self._dispatch(["run", "2", "--share-history"])
-        assert ("run", "2", [], True, True) in calls
-
-    def test_no_share_history_flag(self):
-        calls = self._dispatch(["run", "2", "--no-share-history"])
-        assert ("run", "2", [], True, False) in calls
-
-    def test_tail_forwarded_verbatim(self):
-        calls = self._dispatch(["run", "2", "--", "--resume", "--model", "x"])
-        assert ("run", "2", ["--resume", "--model", "x"], True, False) in calls
-
-    def test_tail_may_contain_run_flags(self):
-        """Args after `--` are NOT parsed by cswap, even if they look like ours."""
-        calls = self._dispatch(["run", "2", "--", "--no-share"])
-        assert ("run", "2", ["--no-share"], True, False) in calls
-
-    def test_run_without_account_errors(self, capsys):
-        with patch.object(sys, "argv", ["claude-swap", "run"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-        assert excinfo.value.code == 2
-        assert "NUM|EMAIL" in capsys.readouterr().err
-
-    def test_run_unknown_flag_errors(self, capsys):
-        with patch.object(sys, "argv", ["claude-swap", "run", "2", "--bogus"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-        assert excinfo.value.code == 2
-
-    def test_run_help(self, capsys):
-        with patch.object(sys, "argv", ["claude-swap", "run", "--help"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-        assert excinfo.value.code == 0
-        out = capsys.readouterr().out
-        assert "--no-share" in out
-        assert "this terminal only" in out
-
-    def test_main_help_mentions_run(self):
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--help"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
-        )
-        assert "run 2" in result.stdout
-
-    def test_session_error_exits_cleanly(self, capsys):
-        class FailingSessionManager:
-            def __init__(self, switcher):
-                pass
-
-            def run(self, identifier, claude_args, share=True, share_history=False):
-                from claude_swap.exceptions import SessionError
-
-                raise SessionError("boom")
-
-        with patch("claude_swap.session.SessionManager", FailingSessionManager), \
-             patch("claude_swap.cli.ClaudeAccountSwitcher"), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch.object(sys, "argv", ["claude-swap", "run", "2"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-
-        assert excinfo.value.code == 1
-        assert "boom" in capsys.readouterr().err
-
-
-class TestSubcommandAliases:
-    """Memorable subcommands (`cswap switch`, `cswap list`, ...) → classic flags."""
-
-    def test_translate_is_noop_for_flags(self):
-        """argv that already uses --flags is passed through untouched."""
-        assert cli._translate_subcommand(["--list"]) == ["--list"]
-        assert cli._translate_subcommand(["--switch", "--json"]) == ["--switch", "--json"]
-        assert cli._translate_subcommand([]) == []
-
-    def test_translate_bare_switch_rotates(self):
-        assert cli._translate_subcommand(["switch"]) == ["--switch"]
-        assert cli._translate_subcommand(["switch", "--strategy", "best"]) == [
-            "--switch", "--strategy", "best",
-        ]
-
-    def test_translate_switch_with_target(self):
-        assert cli._translate_subcommand(["switch", "2"]) == ["--switch-to", "2"]
-        assert cli._translate_subcommand(["switch", "u@x.com", "--json"]) == [
-            "--switch-to", "u@x.com", "--json",
-        ]
-
-    def test_translate_simple_verbs_and_aliases(self):
-        assert cli._translate_subcommand(["list"]) == ["--list"]
-        assert cli._translate_subcommand(["ls"]) == ["--list"]
-        assert cli._translate_subcommand(["status"]) == ["--status"]
-        assert cli._translate_subcommand(["add"]) == ["--add-account"]
-        assert cli._translate_subcommand(["rm", "2"]) == ["--remove-account", "2"]
-        assert cli._translate_subcommand(["upgrade"]) == ["--upgrade"]
-        assert cli._translate_subcommand(["update"]) == ["--upgrade"]
-
-    def test_translate_value_verbs_pass_through_extra_flags(self):
-        assert cli._translate_subcommand(["export", "b.cswap", "--full"]) == [
-            "--export", "b.cswap", "--full",
-        ]
-        assert cli._translate_subcommand(["add-token", "sk-tok", "--slot", "3"]) == [
-            "--add-token", "sk-tok", "--slot", "3",
-        ]
-
-    def test_translate_unknown_verb_unchanged(self):
-        """An unrecognized first token is left for the parser to reject."""
-        assert cli._translate_subcommand(["bogus"]) == ["bogus"]
-
-    def test_switch_subcommand_dispatches_switch_to(self):
-        """`cswap switch 2` reaches switch_to("2")."""
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "switch", "2"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            cli.main()
-        switcher_cls.return_value.switch_to.assert_called_once_with(
-            "2", json_output=False, force=False
-        )
-
-    def test_bare_switch_subcommand_dispatches_switch(self):
-        """`cswap switch` reaches switch() (rotate)."""
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "switch"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            cli.main()
-        switcher_cls.return_value.switch.assert_called_once_with(
-            strategy=None, json_output=False
-        )
-
-    def test_switch_with_to_flag_is_rejected(self, capsys):
-        """`cswap switch --to 2` must not be accepted as a broad alias."""
-        with patch.object(sys, "argv", ["claude-swap", "switch", "--to", "2"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-
-        assert excinfo.value.code == 2
-        assert "unrecognized arguments" in capsys.readouterr().err
-
-    def test_list_subcommand_with_json(self):
-        """`cswap list --json` reaches list_accounts(json_output=True)."""
-        payload = {"schemaVersion": 1, "accounts": []}
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch("claude_swap.cli.managed_aggregate_providers", return_value=[]), \
-             patch.object(sys, "argv", ["claude-swap", "list", "--json"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            switcher_cls.return_value.list_accounts.return_value = payload
-            cli.main()
-        switcher_cls.return_value.list_accounts.assert_called_once_with(
-            show_token_status=False, json_output=True,
-        )
-
-    def test_list_subcommand_appends_codex_accounts(self):
-        """`cswap ls` shows Codex accounts after Claude accounts when present."""
-        provider_store = MagicMock()
-        provider_store.definition.ref.frontend = "codex"
-        provider_store.definition.frontend.display_name = "Codex"
-        provider_store.list_accounts.side_effect = [
-            {"schemaVersion": 1, "provider": "codex", "accounts": [{"number": 1}]},
-            None,
-        ]
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as claude_cls, \
-             patch(
-                 "claude_swap.cli.managed_aggregate_providers",
-                 return_value=[provider_store],
-             ), \
-             patch.object(sys, "argv", ["claude-swap", "ls"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            cli.main()
-
-        claude_cls.return_value.list_accounts.assert_called_once_with(
-            show_token_status=False,
-            json_output=False,
-        )
-        assert provider_store.list_accounts.call_args_list == [
-            call(json_output=True),
-            call(json_output=False),
-        ]
-
-    def test_list_subcommand_survives_corrupt_codex_state(self, capsys):
-        """A corrupt Codex state must not fail the primary `cswap list`."""
-        from claude_swap.exceptions import ConfigError
-
-        provider_store = MagicMock()
-        provider_store.definition.frontend.display_name = "Codex"
-        provider_store.list_accounts.side_effect = ConfigError(
-            "Codex state file is not valid JSON"
-        )
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as claude_cls, \
-             patch(
-                 "claude_swap.cli.managed_aggregate_providers",
-                 return_value=[provider_store],
-             ), \
-             patch.object(sys, "argv", ["claude-swap", "ls"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            cli.main()
-
-        claude_cls.return_value.list_accounts.assert_called_once()
-        assert "Codex accounts unavailable" in capsys.readouterr().err
-
-    def test_list_json_emits_schema_v2_provider_envelope(self, capsys):
-        claude_payload = {
-            "schemaVersion": 1,
-            "activeAccountNumber": 2,
-            "accounts": [{"number": 2, "email": "me@example.com", "active": True}],
-        }
-        codex_payload = {
-            "schemaVersion": 1,
-            "provider": {"frontend": "codex", "backend": "openai"},
-            "activeAccountNumber": 1,
-            "accounts": [],
-        }
-
-        provider_store = Mock()
-        provider_store.definition.ref.frontend = "codex"
-        provider_store.definition.ref.backend = "openai"
-        provider_store.list_accounts.return_value = codex_payload
-
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as claude_cls, \
-             patch(
-                 "claude_swap.cli.managed_aggregate_providers",
-                 return_value=[provider_store],
-             ), \
-             patch.object(sys, "argv", ["claude-swap", "list", "--json"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            claude_cls.return_value.list_accounts.return_value = claude_payload
-            cli.main()
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["schemaVersion"] == 2
-        assert out["providers"]["claude"]["default"]["accounts"][0]["email"] == "me@example.com"
-        assert out["providers"]["codex"]["openai"]["accounts"] == []
-        assert "accounts" not in out
-        assert "codex" not in out
-
-    def test_list_json_nests_provider_errors_by_frontend_and_backend(self, capsys):
-        from claude_swap.exceptions import ConfigError
-
-        claude_payload = {
-            "schemaVersion": 1,
-            "activeAccountNumber": None,
-            "accounts": [],
-        }
-        provider_store = Mock()
-        provider_store.definition.ref.frontend = "codex"
-        provider_store.definition.ref.backend = "openai"
-        provider_store.list_accounts.side_effect = ConfigError("Codex state file is not valid JSON")
-
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as claude_cls, \
-             patch(
-                 "claude_swap.cli.managed_aggregate_providers",
-                 return_value=[provider_store],
-             ), \
-             patch.object(sys, "argv", ["claude-swap", "list", "--json"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            claude_cls.return_value.list_accounts.return_value = claude_payload
-            cli.main()
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["providers"]["codex"]["openai"] == {
-            "error": {
-                "type": "ConfigError",
-                "message": "Codex state file is not valid JSON",
-            }
-        }
-
-    def test_codex_requires_backend(self, capsys):
-        with patch.object(sys, "argv", ["claude-swap", "codex", "list"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-
-        assert excinfo.value.code == 2
-        assert "codex requires a backend" in capsys.readouterr().err
-
-    def test_codex_openai_add_dispatches(self):
-        with patch("claude_swap.cli.get_provider") as get_provider, \
-             patch.object(
-                 sys,
-                 "argv",
-                 ["claude-swap", "codex", "openai", "add", "--label", "work"],
-             ):
-            cli.main()
-
-        get_provider.assert_called_once_with("codex", "openai")
-        get_provider.return_value.add_account.assert_called_once_with(
-            label="work",
-            slot=None,
-        )
-
-    def test_codex_openai_switch_dispatches(self):
-        with patch("claude_swap.cli.get_provider") as get_provider, \
-             patch.object(
-                 sys,
-                 "argv",
-                 ["claude-swap", "codex", "openai", "switch", "--to", "2"],
-             ):
-            cli.main()
-
-        get_provider.assert_called_once_with("codex", "openai")
-        get_provider.return_value.switch.assert_called_once_with(
-            "2",
-            json_output=False,
-        )
-
-    def test_opencode_requires_backend(self, capsys):
-        with patch.object(sys, "argv", ["claude-swap", "opencode", "list"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-
-        assert excinfo.value.code == 2
-        assert "opencode requires a backend" in capsys.readouterr().err
-
-    def test_opencode_openai_switch_to_flag_dispatches(self):
-        with patch("claude_swap.cli.get_provider") as get_provider, \
-             patch.object(
-                 sys,
-                 "argv",
-                 ["claude-swap", "opencode", "openai", "--switch-to", "2"],
-             ):
-            cli.main()
-
-        get_provider.assert_called_once_with("opencode", "openai")
-        get_provider.return_value.switch.assert_called_once_with(
-            "2",
-            json_output=False,
-        )
-
-    def test_codex_openai_list_json_serialized_to_stdout(self, capsys):
-        payload = {"schemaVersion": 1, "provider": "codex", "accounts": []}
-        with patch("claude_swap.cli.get_provider") as get_provider, \
-             patch.object(
-                 sys,
-                 "argv",
-                 ["claude-swap", "codex", "openai", "list", "--json"],
-             ):
-            get_provider.return_value.list_accounts.return_value = payload
-            cli.main()
-
-        get_provider.assert_called_once_with("codex", "openai")
-        get_provider.return_value.list_accounts.assert_called_once_with(json_output=True)
-        assert json.loads(capsys.readouterr().out) == payload
-
-    def test_claude_default_list_dispatches_to_claude_switcher(self):
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "claude", "default", "list"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            cli.main()
-
-        switcher_cls.return_value.list_accounts.assert_called_once_with(
-            show_token_status=False,
-            json_output=False,
-        )
-
-    def test_claude_default_switch_to_dispatches_to_claude_switcher(self):
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(
-                 sys,
-                 "argv",
-                 ["claude-swap", "claude", "default", "switch", "--to", "2"],
-             ), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            cli.main()
-
-        switcher_cls.return_value.switch_to.assert_called_once_with(
-            "2",
-            json_output=False,
-            force=False,
-        )
-
-    def test_run_subcommand_still_dispatches(self):
-        """`cswap run 2` keeps reaching the session pre-dispatch (not translated)."""
-        calls = []
-
-        class FakeSessionManager:
-            def __init__(self, switcher):
-                pass
-
-            def run(self, identifier, claude_args, share=True, share_history=False):
-                calls.append((identifier, claude_args, share))
-
-        with patch("claude_swap.session.SessionManager", FakeSessionManager), \
-             patch("claude_swap.cli.ClaudeAccountSwitcher"), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch.object(sys, "argv", ["claude-swap", "run", "2"]):
-            cli.main()
-        assert calls == [("2", [], True)]
-
-    def test_help_subcommand_prints_help(self):
-        """`cswap help` exits 0 and prints help (with subcommand docs)."""
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "help"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
-        )
-        assert result.returncode == 0
-        assert "Multi-Account Switcher" in result.stdout
-        assert "Commands:" in result.stdout
-        assert "keep working" in result.stdout
-
-
-class TestJsonOutputCli:
-    """CLI wiring for ``--json``: validation, single serialization, error envelope."""
-
-    def test_json_rejected_without_supported_command(self, capsys):
-        """--purge --json is rejected (bare --json instead hits the required-group error)."""
-        with patch.object(sys, "argv", ["claude-swap", "--purge", "--json"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-        assert excinfo.value.code == 2
-        assert "--json can only be used with" in capsys.readouterr().err
-
-    def test_token_status_with_json_rejected(self, capsys):
-        with patch.object(sys, "argv", ["claude-swap", "--list", "--token-status", "--json"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-        assert excinfo.value.code == 2
-        assert "--token-status cannot be combined with --json" in capsys.readouterr().err
-
-    def test_list_json_serialized_to_stdout(self, capsys):
-        payload = {"schemaVersion": 1, "activeAccountNumber": None, "accounts": []}
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch("claude_swap.cli.managed_aggregate_providers", return_value=[]), \
-             patch.object(sys, "argv", ["claude-swap", "--list", "--json"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            switcher_cls.return_value.list_accounts.return_value = payload
-            cli.main()
-
-        switcher_cls.return_value.list_accounts.assert_called_once_with(
-            show_token_status=False, json_output=True,
-        )
-        out = capsys.readouterr().out
-        assert json.loads(out) == {
-            "schemaVersion": 2,
-            "providers": {
-                "claude": {
-                    "default": payload,
-                }
-            },
-        }
-
-    def test_switch_json_forwarded_and_serialized(self, capsys):
-        payload = {"schemaVersion": 1, "switched": True}
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "--switch", "--json"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            switcher_cls.return_value.switch.return_value = payload
-            cli.main()
-
-        switcher_cls.return_value.switch.assert_called_once_with(
-            strategy=None, json_output=True,
-        )
-        assert json.loads(capsys.readouterr().out) == payload
-
-    def test_error_envelope_on_stdout_with_exit_1(self, capsys):
-        from claude_swap.exceptions import ConfigError
-
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "--status", "--json"]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            switcher_cls.return_value.status.side_effect = ConfigError("nope")
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-
-        assert excinfo.value.code == 1
-        captured = capsys.readouterr()
-        envelope = json.loads(captured.out)  # error went to stdout as JSON
-        assert envelope["error"] == {"type": "ConfigError", "message": "nope"}
-        assert captured.err == ""  # nothing on stderr in JSON mode
-
-
-class TestAutoCommand:
-    """`cswap auto` pre-dispatch: parsing, settings merge, exit codes, JSONL."""
-
-    class FakeEngine:
-        instances: list = []
-        tick_outcome = None  # set per test (TickOutcome)
-
-        def __init__(self, switcher, settings, on_event, *, dry_run=False,
-                     state_path=None, clock=None):
-            self.switcher = switcher
-            self.settings = settings
-            self.on_event = on_event
-            self.dry_run = dry_run
-            type(self).instances.append(self)
-
-        def tick(self):
-            from claude_swap.autoswitch import TickOutcome
-
-            return type(self).tick_outcome or TickOutcome.NO_ACTION
-
-        def run_loop(self):
-            return 0
-
-        def stop(self):
+    def remove_account(self, identifier: str, assume_yes: bool = False) -> None:
+        self.calls.append(("remove_account", {"identifier": identifier}))
+
+
+@pytest.fixture
+def stub_switcher(monkeypatch: pytest.MonkeyPatch) -> type[_StubSwitcher]:
+    monkeypatch.setattr("claude_swap.cli.ClaudeAccountSwitcher", _StubSwitcher)
+    monkeypatch.setattr("claude_swap.cli.managed_aggregate_providers", lambda: [])
+    _StubSwitcher.last = None
+    _StubSwitcher.backup_dir_override = None
+    return _StubSwitcher
+
+
+def test_ls_aggregates_with_schema_v2_envelope(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["ls", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["schemaVersion"] == 2
+    assert payload["providers"]["claude"]["default"]["accounts"] == []
+    assert stub_switcher.last is not None
+    assert stub_switcher.last.calls == [
+        ("list_accounts", {"show_token_status": False, "json_output": True})
+    ]
+
+
+def test_ls_human_mode_prints_accounts(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["ls"])
+    assert result.exit_code == 0
+    assert "Accounts:" in result.stdout
+
+
+def test_purge_routes_to_switcher(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["purge"])
+    assert result.exit_code == 0
+    assert stub_switcher.last.calls == [("purge", {})]
+
+
+def test_upgrade_runs_self_upgrade_before_switcher_init(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = {}
+
+    def fake_upgrade() -> int:
+        called["upgrade"] = True
+        return 0
+
+    monkeypatch.setattr("claude_swap.update_check.run_self_upgrade", fake_upgrade)
+
+    def explode(*args: object, **kwargs: object) -> None:
+        raise AssertionError("upgrade must not construct the switcher")
+
+    monkeypatch.setattr("claude_swap.cli.ClaudeAccountSwitcher", explode)
+    result = runner.invoke(app, ["upgrade"])
+    assert result.exit_code == 0
+    assert called == {"upgrade": True}
+
+
+def test_update_is_an_alias_of_upgrade(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("claude_swap.update_check.run_self_upgrade", lambda: 0)
+    assert runner.invoke(app, ["update"]).exit_code == 0
+
+
+def test_version_flag() -> None:
+    from claude_swap import __version__
+
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert __version__ in result.stdout
+
+
+def test_config_set_and_get_round_trip(
+    stub_switcher: type[_StubSwitcher], tmp_path: Path
+) -> None:
+    # Point the stub's backup root somewhere real so settings.json lands there.
+    _StubSwitcher.backup_dir_override = tmp_path
+
+    result = runner.invoke(app, ["config", "set", "autoswitch.threshold", "80"])
+    assert result.exit_code == 0, result.output
+    assert "autoswitch.threshold = 80" in result.stdout
+
+    result = runner.invoke(app, ["config", "get", "autoswitch.threshold"])
+    assert result.exit_code == 0
+    assert "80" in result.stdout
+
+    result = runner.invoke(app, ["config", "get", "autoswitch.threshold", "--json"])
+    payload = json.loads(result.stdout)
+    assert payload == {
+        "schemaVersion": 1,
+        "key": "autoswitch.threshold",
+        "value": 80.0,
+        "isSet": True,
+    }
+
+
+def test_bare_config_lists_settings(
+    stub_switcher: type[_StubSwitcher], tmp_path: Path
+) -> None:
+    _StubSwitcher.backup_dir_override = tmp_path
+    result = runner.invoke(app, ["config"])
+    assert result.exit_code == 0
+    assert "autoswitch.threshold" in result.stdout
+
+
+def test_group_level_json_flag_applies_to_get(
+    stub_switcher: type[_StubSwitcher], tmp_path: Path
+) -> None:
+    _StubSwitcher.backup_dir_override = tmp_path
+    result = runner.invoke(app, ["config", "--json", "get", "autoswitch.threshold"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["key"] == "autoswitch.threshold"
+    assert payload["isSet"] is False
+    assert "value" in payload
+
+
+def test_group_level_json_flag_rejected_for_set(
+    stub_switcher: type[_StubSwitcher], tmp_path: Path
+) -> None:
+    _StubSwitcher.backup_dir_override = tmp_path
+    result = runner.invoke(
+        app, ["config", "--json", "set", "autoswitch.threshold", "80"]
+    )
+    assert result.exit_code == 2
+
+
+def test_post_verb_json_flag_still_works(
+    stub_switcher: type[_StubSwitcher], tmp_path: Path
+) -> None:
+    _StubSwitcher.backup_dir_override = tmp_path
+    result = runner.invoke(app, ["config", "get", "autoswitch.threshold", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["key"] == "autoswitch.threshold"
+
+
+def _last_call(stub: type[_StubSwitcher]) -> tuple[str, dict[str, object]]:
+    assert stub.last is not None and stub.last.calls
+    return stub.last.calls[-1]
+
+
+def test_claude_list_is_claude_only(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["claude", "default", "list", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["schemaVersion"] == 1  # NOT the aggregate v2 envelope
+    assert _last_call(stub_switcher) == (
+        "list_accounts",
+        {"show_token_status": False, "json_output": True},
+    )
+
+
+def test_claude_list_token_status_conflicts_with_json(
+    stub_switcher: type[_StubSwitcher],
+) -> None:
+    result = runner.invoke(
+        app, ["claude", "default", "list", "--json", "--token-status"]
+    )
+    assert result.exit_code == 2
+
+
+def test_claude_status(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["claude", "default", "status"])
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == ("status", {"json_output": False})
+
+
+def test_claude_add_with_slot(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["claude", "default", "add", "--slot", "3"])
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == ("add_account", {"slot": 3})
+
+
+def test_claude_add_token(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(
+        app,
+        ["claude", "default", "add-token", "sk-tok", "--email", "me@x.com", "--slot", "2"],
+    )
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == (
+        "add_account_from_token",
+        {"token": "sk-tok", "email": "me@x.com", "slot": 2},
+    )
+
+
+def test_claude_bare_switch_rotates(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["claude", "default", "switch"])
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == (
+        "switch",
+        {"strategy": None, "json_output": False},
+    )
+
+
+def test_claude_switch_with_strategy(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["claude", "default", "switch", "--strategy", "best"])
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == (
+        "switch",
+        {"strategy": "best", "json_output": False},
+    )
+
+
+def test_claude_switch_rejects_unknown_strategy(
+    stub_switcher: type[_StubSwitcher],
+) -> None:
+    result = runner.invoke(app, ["claude", "default", "switch", "--strategy", "bogus"])
+    assert result.exit_code == 2  # enum choices enforced at the CLI boundary
+
+
+def test_claude_switch_positional_target(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["claude", "default", "switch", "2"])
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == (
+        "switch_to",
+        {"identifier": "2", "json_output": False, "force": False},
+    )
+
+
+def test_claude_switch_to_flag_and_force(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(
+        app, ["claude", "default", "switch", "--to", "me@x.com", "--force"]
+    )
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == (
+        "switch_to",
+        {"identifier": "me@x.com", "json_output": False, "force": True},
+    )
+
+
+def test_claude_switch_rejects_both_positional_and_to(
+    stub_switcher: type[_StubSwitcher],
+) -> None:
+    assert runner.invoke(app, ["claude", "default", "switch", "2", "--to", "3"]).exit_code == 2
+
+
+def test_claude_switch_strategy_conflicts_with_target(
+    stub_switcher: type[_StubSwitcher],
+) -> None:
+    result = runner.invoke(
+        app, ["claude", "default", "switch", "2", "--strategy", "best"]
+    )
+    assert result.exit_code == 2
+
+
+def test_claude_remove(stub_switcher: type[_StubSwitcher]) -> None:
+    result = runner.invoke(app, ["claude", "default", "remove", "2"])
+    assert result.exit_code == 0
+    assert _last_call(stub_switcher) == ("remove_account", {"identifier": "2"})
+
+
+def test_claude_export_and_import(
+    stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded: dict[str, object] = {}
+
+    def fake_export(switcher, destination, account=None, full=False):
+        recorded["export"] = (destination, account, full)
+
+    def fake_import(switcher, source, force=False):
+        recorded["import"] = (source, force)
+
+    monkeypatch.setattr("claude_swap.transfer.export_accounts", fake_export)
+    monkeypatch.setattr("claude_swap.transfer.import_accounts", fake_import)
+
+    assert runner.invoke(
+        app, ["claude", "default", "export", "out.json", "--account", "2", "--full"]
+    ).exit_code == 0
+    assert recorded["export"] == ("out.json", "2", True)
+
+    assert runner.invoke(
+        app, ["claude", "default", "import", "in.json", "--force"]
+    ).exit_code == 0
+    assert recorded["import"] == ("in.json", True)
+
+
+def test_claude_json_error_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    from claude_swap.exceptions import ConfigError
+
+    class _BrokenSwitcher(_StubSwitcher):
+        def status(self, json_output: bool = False) -> dict | None:
+            raise ConfigError("boom")
+
+    monkeypatch.setattr("claude_swap.cli.ClaudeAccountSwitcher", _BrokenSwitcher)
+    result = runner.invoke(app, ["claude", "default", "status", "--json"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["error"]["message"] == "boom"
+    assert result.stderr == ""  # JSON mode keeps stderr clean (purity guarantee)
+
+
+def test_run_forwards_args_after_double_dash(
+    stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded: dict[str, object] = {}
+
+    class _StubSession:
+        def __init__(self, switcher: object) -> None:
             pass
 
-    @pytest.fixture(autouse=True)
-    def _fresh_fake(self):
-        self.FakeEngine.instances = []
-        self.FakeEngine.tick_outcome = None
+        def run(
+            self,
+            identifier: str,
+            claude_args: list[str],
+            share: bool = True,
+            share_history: bool = False,
+        ) -> None:
+            recorded["run"] = (identifier, claude_args, share, share_history)
+            raise SystemExit(0)
 
-    def _run(self, argv: list[str], temp_home):
-        with patch("claude_swap.autoswitch.AutoSwitchEngine", self.FakeEngine), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch.object(sys, "argv", ["claude-swap", "auto", *argv]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-        return excinfo.value.code
+    monkeypatch.setattr("claude_swap.session.SessionManager", _StubSession)
+    result = runner.invoke(
+        app,
+        ["claude", "default", "run", "2", "--no-share", "--", "--resume", "-p", "hi"],
+    )
+    assert result.exit_code == 0
+    assert recorded["run"] == ("2", ["--resume", "-p", "hi"], False, False)
 
-    def test_once_exit_code_switched(self, temp_home):
-        from claude_swap.autoswitch import TickOutcome
 
-        self.FakeEngine.tick_outcome = TickOutcome.SWITCHED
-        assert self._run(["--once"], temp_home) == 0
+def test_run_rejects_unknown_options_before_double_dash(
+    stub_switcher: type[_StubSwitcher],
+) -> None:
+    result = runner.invoke(app, ["claude", "default", "run", "2", "--bogus-flag"])
+    assert result.exit_code == 2
 
-    def test_once_exit_code_no_action(self, temp_home):
-        from claude_swap.autoswitch import TickOutcome
 
-        self.FakeEngine.tick_outcome = TickOutcome.NO_ACTION
-        assert self._run(["--once"], temp_home) == 2
+def test_auto_once_exit_code_reflects_tick_outcome(
+    stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import types
 
-    def test_once_exit_code_blocked(self, temp_home):
-        from claude_swap.autoswitch import TickOutcome
+    _StubSwitcher.backup_dir_override = tmp_path
+    captured: dict[str, object] = {}
 
-        self.FakeEngine.tick_outcome = TickOutcome.BLOCKED
-        assert self._run(["--once"], temp_home) == 3
+    class _StubEngine:
+        def __init__(self, switcher, settings, emit, dry_run=False) -> None:
+            captured["settings"] = settings
+            captured["dry_run"] = dry_run
 
-    def test_loop_mode_returns_loop_exit(self, temp_home):
-        assert self._run([], temp_home) == 0
-        assert self.FakeEngine.instances  # loop path constructed the engine
+        def tick(self) -> object:
+            return types.SimpleNamespace(value=2)
 
-    def test_flags_override_settings_json(self, temp_home):
-        from claude_swap.paths import get_backup_root
+    monkeypatch.setattr("claude_swap.autoswitch.AutoSwitchEngine", _StubEngine)
+    result = runner.invoke(
+        app, ["claude", "default", "auto", "--once", "--threshold", "80", "--dry-run"]
+    )
+    assert result.exit_code == 2
+    assert captured["dry_run"] is True
+    assert captured["settings"].threshold == 80.0
 
-        backup = get_backup_root()
-        backup.mkdir(parents=True, exist_ok=True)
-        (backup / "settings.json").write_text(json.dumps({
-            "schemaVersion": 1,
-            "autoswitch": {"threshold": 80.0, "cooldownSeconds": 42.0},
-        }))
-        self._run(["--once", "--threshold", "60"], temp_home)
-        engine = self.FakeEngine.instances[-1]
-        assert engine.settings.threshold == 60.0     # CLI wins
-        assert engine.settings.cooldown_seconds == 42.0  # settings.json kept
 
-    def test_dry_run_forwarded(self, temp_home):
-        self._run(["--once", "--dry-run"], temp_home)
-        assert self.FakeEngine.instances[-1].dry_run is True
+class _StubProviderStore:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
 
-    def test_json_stdout_is_pure_jsonl(self, temp_home, capsys):
-        from claude_swap.autoswitch import NoSwitchEvent, TickOutcome
+    def list_accounts(self, json_output: bool = False) -> dict | None:
+        self.calls.append(("list_accounts", {"json_output": json_output}))
+        if json_output:
+            return {
+                "schemaVersion": 1,
+                "provider": {"frontend": "codex", "backend": "openai"},
+                "activeAccountNumber": None,
+                "accounts": [],
+            }
+        return None
 
-        class EmittingEngine(self.FakeEngine):
-            def tick(self):
-                self.on_event(NoSwitchEvent(reason="below-threshold"))
-                self.on_event(NoSwitchEvent(reason="cooldown"))
-                return TickOutcome.NO_ACTION
+    def status(self, json_output: bool = False) -> dict | None:
+        self.calls.append(("status", {"json_output": json_output}))
+        return {"schemaVersion": 1, "active": None} if json_output else None
 
-        with patch("claude_swap.autoswitch.AutoSwitchEngine", EmittingEngine), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch.object(sys, "argv", ["claude-swap", "auto", "--once", "--json"]):
-            with pytest.raises(SystemExit):
-                cli.main()
-        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-        assert len(lines) == 2
-        for line in lines:
-            payload = json.loads(line)
-            assert payload["event"] == "no-switch"
-            assert payload["schemaVersion"] == 1
+    def add_account(self, label: str | None, slot: int | None) -> None:
+        self.calls.append(("add_account", {"label": label, "slot": slot}))
 
-    def test_unknown_flag_errors(self, temp_home, capsys):
-        with patch.object(sys, "argv", ["claude-swap", "auto", "--bogus"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-        assert excinfo.value.code == 2
+    def switch(self, identifier: str | None, json_output: bool) -> dict | None:
+        self.calls.append(("switch", {"identifier": identifier, "json_output": json_output}))
+        return None
 
-    def test_auto_help(self, capsys):
-        with patch.object(sys, "argv", ["claude-swap", "auto", "--help"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-        assert excinfo.value.code == 0
-        out = capsys.readouterr().out
-        assert "--once" in out
-        assert "Exit codes" in out
+    def remove_account(self, identifier: str) -> None:
+        self.calls.append(("remove_account", {"identifier": identifier}))
 
-    def test_main_help_mentions_auto(self):
-        result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--help"],
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(),
+
+@pytest.fixture
+def stub_provider(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    captured: dict[str, object] = {"store": _StubProviderStore()}
+
+    def fake_get_provider(frontend: str, backend: str) -> _StubProviderStore:
+        captured["ref"] = (frontend, backend)
+        return captured["store"]
+
+    monkeypatch.setattr("claude_swap.cli.get_provider", fake_get_provider)
+    return captured
+
+
+def test_codex_list_json(stub_provider: dict[str, object]) -> None:
+    result = runner.invoke(app, ["codex", "openai", "list", "--json"])
+    assert result.exit_code == 0
+    assert stub_provider["ref"] == ("codex", "openai")
+    assert stub_provider["store"].calls == [("list_accounts", {"json_output": True})]
+    assert json.loads(result.stdout)["schemaVersion"] == 1
+
+
+def test_codex_add_with_label_and_slot(stub_provider: dict[str, object]) -> None:
+    result = runner.invoke(
+        app, ["codex", "openai", "add", "--label", "work", "--slot", "2"]
+    )
+    assert result.exit_code == 0
+    assert stub_provider["store"].calls == [("add_account", {"label": "work", "slot": 2})]
+
+
+def test_codex_switch_positional_and_to_flag(stub_provider: dict[str, object]) -> None:
+    assert runner.invoke(app, ["codex", "openai", "switch", "2"]).exit_code == 0
+    assert runner.invoke(app, ["codex", "openai", "switch", "--to", "work"]).exit_code == 0
+    assert runner.invoke(app, ["codex", "openai", "switch"]).exit_code == 0  # rotate
+    assert stub_provider["store"].calls == [
+        ("switch", {"identifier": "2", "json_output": False}),
+        ("switch", {"identifier": "work", "json_output": False}),
+        ("switch", {"identifier": None, "json_output": False}),
+    ]
+
+
+def test_codex_remove(stub_provider: dict[str, object]) -> None:
+    assert runner.invoke(app, ["codex", "openai", "remove", "2"]).exit_code == 0
+    assert stub_provider["store"].calls == [("remove_account", {"identifier": "2"})]
+
+
+def test_opencode_switch_is_refused(temp_home: Path) -> None:
+    # Real registry + real store: snapshot-refused providers error before
+    # touching any account state. Note: on click versions that separate
+    # stderr, check result.stderr instead of result.output for the message.
+    result = runner.invoke(app, ["opencode", "openai", "switch", "1"])
+    assert result.exit_code == 1
+    assert "cannot safely restore" in result.output
+
+
+def test_opencode_verbs_exist(stub_provider: dict[str, object]) -> None:
+    result = runner.invoke(app, ["opencode", "openai", "list"])
+    assert result.exit_code == 0
+    assert stub_provider["ref"] == ("opencode", "openai")
+
+
+# --------------------------------------------------------------------------
+# Removal / contract assertions: the legacy argparse surface is gone. These
+# pin the Typer tree's shape so a regression that reintroduces a top-level
+# verb, a UI command, or a `--flag` interface fails loudly.
+# --------------------------------------------------------------------------
+
+
+def test_top_level_claude_verbs_are_removed() -> None:
+    for verb in ("list", "status", "add", "add-token", "remove", "switch",
+                 "export", "import", "run", "auto"):
+        result = runner.invoke(app, [verb])
+        assert result.exit_code == 2, f"top-level '{verb}' must not exist"
+
+
+def test_ui_commands_are_removed() -> None:
+    for verb in ("tui", "watch", "menubar"):
+        assert runner.invoke(app, [verb]).exit_code == 2
+
+
+def test_legacy_flags_are_removed() -> None:
+    for flag in ("--list", "--status", "--switch", "--switch-to", "--add-account",
+                 "--remove-account", "--export", "--import", "--purge", "--tui"):
+        result = runner.invoke(app, [flag] if flag != "--switch-to" else [flag, "2"])
+        assert result.exit_code == 2, f"legacy '{flag}' must not parse"
+
+
+def test_bare_cswap_prints_help() -> None:
+    result = runner.invoke(app, [])
+    assert "Usage" in result.output
+    assert "claude" in result.output and "codex" in result.output
+
+
+def test_frontend_without_backend_shows_help() -> None:
+    result = runner.invoke(app, ["codex"])
+    assert "openai" in result.output
+
+
+# --------------------------------------------------------------------------
+# Ported behavioral tests from the retired argparse suite. These cover
+# contract guarantees (error exit codes, JSON purity, aggregate-list
+# resilience, provider-envelope nesting, auto loop/settings/JSONL) that the
+# routing/flag tests above do not.
+# --------------------------------------------------------------------------
+
+
+def test_run_session_error_exits_cleanly(
+    stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ClaudeSwitchError during `run` exits 1 with the message on stderr."""
+    from claude_swap.exceptions import SessionError
+
+    class _FailingSession:
+        def __init__(self, switcher: object) -> None:
+            pass
+
+        def run(
+            self,
+            identifier: str,
+            claude_args: list[str],
+            share: bool = True,
+            share_history: bool = False,
+        ) -> None:
+            raise SessionError("boom")
+
+    monkeypatch.setattr("claude_swap.session.SessionManager", _FailingSession)
+    result = runner.invoke(app, ["claude", "default", "run", "2"])
+    assert result.exit_code == 1
+    assert "boom" in result.stderr
+
+
+def test_ls_human_mode_appends_provider_accounts(
+    stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ls` renders provider sections after Claude when they have accounts."""
+    from unittest.mock import MagicMock, call
+
+    provider_store = MagicMock()
+    provider_store.definition.ref.frontend = "codex"
+    provider_store.definition.frontend.display_name = "Codex"
+    provider_store.list_accounts.side_effect = [
+        {"schemaVersion": 1, "provider": "codex", "accounts": [{"number": 1}]},
+        None,
+    ]
+    monkeypatch.setattr(
+        "claude_swap.cli.managed_aggregate_providers", lambda: [provider_store]
+    )
+    result = runner.invoke(app, ["ls"])
+    assert result.exit_code == 0
+    assert provider_store.list_accounts.call_args_list == [
+        call(json_output=True),
+        call(json_output=False),
+    ]
+
+
+def test_ls_human_mode_survives_corrupt_provider_state(
+    stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken provider tree must not fail the primary Claude listing."""
+    from unittest.mock import MagicMock
+
+    from claude_swap.exceptions import ConfigError
+
+    provider_store = MagicMock()
+    provider_store.definition.frontend.display_name = "Codex"
+    provider_store.list_accounts.side_effect = ConfigError(
+        "Codex state file is not valid JSON"
+    )
+    monkeypatch.setattr(
+        "claude_swap.cli.managed_aggregate_providers", lambda: [provider_store]
+    )
+    result = runner.invoke(app, ["ls"])
+    assert result.exit_code == 0
+    assert "Codex accounts unavailable" in result.stderr
+
+
+def test_ls_json_nests_providers_by_frontend_and_backend(
+    stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import Mock
+
+    codex_payload = {
+        "schemaVersion": 1,
+        "provider": {"frontend": "codex", "backend": "openai"},
+        "activeAccountNumber": 1,
+        "accounts": [],
+    }
+    provider_store = Mock()
+    provider_store.definition.ref.frontend = "codex"
+    provider_store.definition.ref.backend = "openai"
+    provider_store.list_accounts.return_value = codex_payload
+    monkeypatch.setattr(
+        "claude_swap.cli.managed_aggregate_providers", lambda: [provider_store]
+    )
+    result = runner.invoke(app, ["ls", "--json"])
+    assert result.exit_code == 0
+    out = json.loads(result.stdout)
+    assert out["schemaVersion"] == 2
+    assert out["providers"]["claude"]["default"]["accounts"] == []
+    assert out["providers"]["codex"]["openai"]["accounts"] == []
+    assert "accounts" not in out  # flat legacy keys are gone
+    assert "codex" not in out
+
+
+def test_ls_json_nests_provider_errors(
+    stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import Mock
+
+    from claude_swap.exceptions import ConfigError
+
+    provider_store = Mock()
+    provider_store.definition.ref.frontend = "codex"
+    provider_store.definition.ref.backend = "openai"
+    provider_store.list_accounts.side_effect = ConfigError(
+        "Codex state file is not valid JSON"
+    )
+    monkeypatch.setattr(
+        "claude_swap.cli.managed_aggregate_providers", lambda: [provider_store]
+    )
+    result = runner.invoke(app, ["ls", "--json"])
+    assert result.exit_code == 0
+    out = json.loads(result.stdout)
+    assert out["providers"]["codex"]["openai"] == {
+        "error": {
+            "type": "ConfigError",
+            "message": "Codex state file is not valid JSON",
+        }
+    }
+
+
+def test_auto_loop_mode_returns_loop_exit(
+    stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _StubSwitcher.backup_dir_override = tmp_path
+    instances: list[object] = []
+
+    class _LoopEngine:
+        def __init__(self, switcher, settings, emit, dry_run=False) -> None:
+            instances.append(self)
+
+        def run_loop(self) -> int:
+            return 0
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr("claude_swap.autoswitch.AutoSwitchEngine", _LoopEngine)
+    result = runner.invoke(app, ["claude", "default", "auto"])
+    assert result.exit_code == 0
+    assert instances  # the loop path constructed the engine
+
+
+def test_auto_flags_override_settings_file(
+    stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """CLI flags win; unspecified keys keep their settings.json values."""
+    import types
+
+    _StubSwitcher.backup_dir_override = tmp_path
+    (tmp_path / "settings.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "autoswitch": {"threshold": 80.0, "cooldownSeconds": 42.0},
+            }
         )
-        assert "auto" in result.stdout
+    )
+    captured: dict[str, object] = {}
 
-    def test_switcher_error_exits_1(self, temp_home, capsys):
-        from claude_swap.exceptions import ConfigError
+    class _CaptureEngine:
+        def __init__(self, switcher, settings, emit, dry_run=False) -> None:
+            captured["settings"] = settings
 
-        with patch("claude_swap.cli.ClaudeAccountSwitcher",
-                   side_effect=ConfigError("nope")), \
-             patch.object(sys, "argv", ["claude-swap", "auto", "--once"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-        assert excinfo.value.code == 1
-        assert "nope" in capsys.readouterr().err  # printer.error -> stderr
+        def tick(self) -> object:
+            return types.SimpleNamespace(value=2)
+
+    monkeypatch.setattr("claude_swap.autoswitch.AutoSwitchEngine", _CaptureEngine)
+    result = runner.invoke(
+        app, ["claude", "default", "auto", "--once", "--threshold", "60"]
+    )
+    assert result.exit_code == 2
+    assert captured["settings"].threshold == 60.0        # CLI wins
+    assert captured["settings"].cooldown_seconds == 42.0  # settings.json kept
+
+
+def test_auto_json_stdout_is_pure_jsonl(
+    stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import types
+
+    from claude_swap.autoswitch import NoSwitchEvent
+
+    _StubSwitcher.backup_dir_override = tmp_path
+
+    class _EmittingEngine:
+        def __init__(self, switcher, settings, emit, dry_run=False) -> None:
+            self.emit = emit
+
+        def tick(self) -> object:
+            self.emit(NoSwitchEvent(reason="below-threshold"))
+            self.emit(NoSwitchEvent(reason="cooldown"))
+            return types.SimpleNamespace(value=2)
+
+    monkeypatch.setattr("claude_swap.autoswitch.AutoSwitchEngine", _EmittingEngine)
+    result = runner.invoke(app, ["claude", "default", "auto", "--once", "--json"])
+    assert result.exit_code == 2
+    lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+    assert len(lines) == 2
+    for line in lines:
+        payload = json.loads(line)
+        assert payload["event"] == "no-switch"
+        assert payload["schemaVersion"] == 1
+
+
+def test_auto_switcher_error_exits_1(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_swap.exceptions import ConfigError
+
+    def boom(debug: bool = False) -> None:
+        raise ConfigError("nope")
+
+    monkeypatch.setattr("claude_swap.cli.ClaudeAccountSwitcher", boom)
+    result = runner.invoke(app, ["claude", "default", "auto", "--once"])
+    assert result.exit_code == 1
+    assert "nope" in result.stderr
