@@ -309,25 +309,35 @@ class ProviderAccountStore:
         The symlink target lives inside the provider store; deleting the store
         (purge) would otherwise leave the frontend's auth file dangling and
         log the user out. A no-op when the active auth is already a real file
-        or absent; a dangling symlink is removed outright.
+        or absent; a dangling symlink is removed outright. Runs under the
+        store lock, like every other auth mutation: the target is re-resolved
+        after acquiring the lock so a concurrent switch cannot repoint the
+        symlink between resolve and write, and an in-flight refresh persist
+        cannot resurrect files mid-purge. Raises ConfigError when the target
+        exists but cannot be read - purge aborts rather than discarding a
+        recoverable login.
         """
-        target = self._active_symlink_target()
-        if target is None:
+        if self._active_symlink_target() is None:
             return
-        try:
-            text = target.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            self.auth_path.unlink(missing_ok=True)
-            return
-        except OSError as exc:
-            raise ConfigError(
-                f"Failed to read {self.definition.display_name} active auth "
-                f"target {target}: {exc}"
-            ) from exc
-        # _write_active_auth os.replace()s the symlink with the real file
-        # atomically - no prior unlink, so a write failure leaves the
-        # symlink (and the login) intact.
-        self._write_active_auth(text)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        with FileLock(self.lock_file):
+            target = self._active_symlink_target()
+            if target is None:
+                return
+            try:
+                text = target.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                self.auth_path.unlink(missing_ok=True)
+                return
+            except OSError as exc:
+                raise ConfigError(
+                    f"Failed to read {self.definition.display_name} active auth "
+                    f"target {target}: {exc}"
+                ) from exc
+            # _write_active_auth os.replace()s the symlink with the real file
+            # atomically - no prior unlink, so a write failure leaves the
+            # symlink (and the login) intact.
+            self._write_active_auth(text)
 
     def _adopt_active_real_file(self, data: dict[str, Any]) -> None:
         """Fold a pre-symlink real auth.json into its managed account's target.
