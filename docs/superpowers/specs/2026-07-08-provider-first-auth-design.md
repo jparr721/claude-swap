@@ -2,7 +2,7 @@
 
 ## Purpose
 
-claude-swap should move from Claude-first behavior with ad hoc Codex support to a provider-first command and data model. The new model must support explicit frontend/backend pairs, keep legacy commands as aliases where useful, and make JSON output consistent across Claude, Codex, and opencode.
+claude-swap should move from Claude-first behavior with ad hoc Codex support to a provider-first command and data model. The new model must support explicit frontend/backend pairs and make JSON output consistent across Claude, Codex, and opencode. The legacy flag interface and top-level verbs are removed outright, not aliased.
 
 The immediate supported providers are:
 
@@ -37,17 +37,7 @@ cswap opencode openai remove 2
 
 Codex/OpenAI switching uses a symlink model, not byte snapshots (see `docs/superpowers/plans/2026-07-08-codex-per-account-auth.md`). Byte-snapshot restore is unsafe for OpenAI's rotating single-use refresh tokens: Codex writes `auth.json` in place (`openai/codex` `codex-rs/login/src/auth/storage.rs:202-219`, open+truncate+write, no rename), so `~/.codex/auth.json` is made a symlink to a per-account credential file that Codex rotates in place. `switch` repoints that symlink (no login/logout/revoke, no byte copy); `add` drives `codex login --device-auth` writing through the symlink into a fresh per-account file. opencode/OpenAI switching is still intentionally refused: its `auth.json` is multi-provider (openai + openrouter), so it needs per-`OPENCODE_DATA_HOME` isolation instead (a separate follow-on). It tracks snapshots for list/status/remove and usage display; to change its account, run `opencode auth login`, then add the active account again.
 
-Compatibility aliases remain for existing users:
-
-- `cswap list` -> `cswap claude default list`
-- `cswap status` -> `cswap claude default status`
-- `cswap add` -> `cswap claude default add`
-- `cswap switch` -> `cswap claude default switch`
-- `cswap switch 2` -> `cswap claude default switch --to 2`
-- `cswap claude list` -> `cswap claude default list`
-- `cswap codex list` -> `cswap codex openai list`
-
-There is no `cswap opencode list` shorthand. opencode must always specify its backend, for example `cswap opencode openai list`.
+There are no compatibility aliases. Commands are strictly namespaced as `cswap <frontend> <backend> <verb>`; the only global commands are `cswap ls`, `cswap config`, `cswap upgrade` (alias: `update`), and `cswap purge`. The legacy flag spellings and top-level verbs were removed and do not parse, and there are no frontend-only shorthands: every provider command must name its backend, for example `cswap opencode openai list`.
 
 ## Architecture
 
@@ -56,7 +46,7 @@ The command parser should route only. Provider behavior belongs behind a registr
 Core units:
 
 - `ProviderDefinition`: identifies one `(frontend, backend)` pair and binds adapters, display names, state names, and feature flags.
-- `ProviderRegistry`: maps command paths to provider definitions and exposes aggregate providers for `cswap list`.
+- `ProviderRegistry`: maps command paths to provider definitions and exposes aggregate providers for `cswap ls`.
 - `FrontendAdapter`: knows where the active auth file lives and how to read/write it.
 - `BackendAdapter`: knows auth schema parsing, identity extraction, usage fetching, and token status classification.
 - `ProviderAccountStore`: generic snapshot lifecycle for add, list, status, switch, remove, cache, and locking.
@@ -113,7 +103,7 @@ The switch only mutates the selected provider store and active auth file.
 
 ## Listing And JSON
 
-Human `cswap list` remains aggregate and frontend-first:
+Human `cswap ls` remains aggregate and frontend-first:
 
 ```text
 Claude accounts:
@@ -126,7 +116,7 @@ opencode / OpenAI accounts:
   <account rows>
 ```
 
-`cswap list --json` jumps straight to schema v2 and does not preserve old top-level Claude fields:
+`cswap ls --json` jumps straight to schema v2 and does not preserve old top-level Claude fields:
 
 ```json
 {
@@ -160,7 +150,7 @@ Aggregate JSON includes only managed non-Claude providers.
 
 Explicit provider commands fail normally. For example, `cswap opencode openai list` exits non-zero if opencode OpenAI state is corrupt.
 
-Aggregate `cswap list` isolates non-Claude provider failures. Human output prints a warning to stderr and continues. JSON output includes provider-level errors:
+Aggregate `cswap ls` isolates non-Claude provider failures. Human output prints a warning to stderr and continues. JSON output includes provider-level errors:
 
 ```json
 {
@@ -193,11 +183,11 @@ Server rejection wins over local timestamps. If opencode's local OpenAI `expires
 Use a shared provider behavior matrix for `codex/openai` and `opencode/openai`:
 
 - add
-- list and `ls`
+- list
 - status
 - switch rotation
 - switch `--to`
-- remove and `rm`
+- remove
 - JSON output
 - active detection
 - expired token reporting
@@ -208,14 +198,12 @@ Provider-specific tests cover:
 - Codex auth path and auth schema.
 - opencode OpenAI auth path and auth schema.
 - Codex store migration to `providers/codex/openai`.
-- CLI aliases for existing Codex commands.
-- Rejection of opencode shorthand without backend.
+- Rejection of frontend-only shorthands (no backend named).
 
 Claude tests cover:
 
-- Existing command aliases route to `claude/default`.
-- New canonical `cswap claude default` commands.
-- `cswap list --json` emits schema v2 with `providers.claude.default`.
+- The canonical `cswap claude default` commands.
+- `cswap ls --json` emits schema v2 with `providers.claude.default`.
 
 ## Implementation Order
 
