@@ -16,7 +16,6 @@ from claude_swap import macos_keychain
 from claude_swap import oauth
 from claude_swap.json_output import USAGE_TOKEN_EXPIRED
 from claude_swap.exceptions import (
-    AccountNotFoundError,
     ConfigError,
     CredentialReadError,
     ValidationError,
@@ -2758,7 +2757,7 @@ class TestAddAccountFromToken:
     def test_basic_add_stores_account(self, temp_home, capsys):
         """A valid token + email should store the account and print 'Added'."""
         switcher = self._make_switcher(temp_home)
-        with patch.object(switcher, "_write_account_credentials") as mock_creds, \
+        with patch.object(switcher, "_write_account_credentials"), \
              patch.object(switcher, "_write_account_config"):
             switcher.add_account_from_token("sk-ant-oat01-abc", "user@example.com")
 

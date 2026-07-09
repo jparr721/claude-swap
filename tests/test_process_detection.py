@@ -11,8 +11,6 @@ from unittest.mock import patch
 import pytest
 
 from claude_swap.process_detection import (
-    ClaudeSession,
-    IdeInstance,
     get_claude_dir,
     get_running_instances,
     is_pid_alive,
