@@ -230,6 +230,23 @@ def _config_list_body(json_mode: bool, debug: bool) -> None:
     _dispatch(action, json_mode=json_mode, update_check=False)
 
 
+def _merged_config_flags(
+    ctx: typer.Context, json_output: bool, debug: bool
+) -> tuple[bool, bool]:
+    """Fold group-level `cswap config --json/--debug` into the subcommand's flags."""
+    parent = ctx.obj or {}
+    return (
+        json_output or bool(parent.get("json", False)),
+        debug or bool(parent.get("debug", False)),
+    )
+
+
+def _reject_group_json(ctx: typer.Context) -> None:
+    """Non-JSON subcommands must fail loudly on a pre-verb --json, not drop it."""
+    if (ctx.obj or {}).get("json"):
+        raise typer.BadParameter("--json can only be used with list or get")
+
+
 @config_app.callback(invoke_without_command=True)
 def config_main(
     ctx: typer.Context,
@@ -239,23 +256,27 @@ def config_main(
     debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
 ) -> None:
     """Read and edit claude-swap settings."""
+    ctx.obj = {"json": json_output, "debug": debug}
     if ctx.invoked_subcommand is None:
         _config_list_body(json_output, debug)
 
 
 @config_app.command("list")
 def config_list(
+    ctx: typer.Context,
     json_output: bool = typer.Option(
         False, "--json", help="Emit machine-readable JSON to stdout"
     ),
     debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
 ) -> None:
     """Show all effective settings (the default)."""
+    json_output, debug = _merged_config_flags(ctx, json_output, debug)
     _config_list_body(json_output, debug)
 
 
 @config_app.command("get")
 def config_get(
+    ctx: typer.Context,
     key: str = typer.Argument(..., metavar="KEY"),
     json_output: bool = typer.Option(
         False, "--json", help="Emit machine-readable JSON to stdout"
@@ -264,6 +285,8 @@ def config_get(
 ) -> None:
     """Print one setting's effective value."""
     from claude_swap.settings import effective_settings, format_setting_value, setting_spec
+
+    json_output, debug = _merged_config_flags(ctx, json_output, debug)
 
     def action() -> None:
         root = _init_switcher(debug).backup_dir
@@ -284,12 +307,16 @@ def config_get(
 
 @config_app.command("set")
 def config_set(
+    ctx: typer.Context,
     key: str = typer.Argument(..., metavar="KEY"),
     value: str = typer.Argument(..., metavar="VALUE"),
     debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
 ) -> None:
     """Validate and persist one setting."""
     from claude_swap.settings import format_setting_value, set_setting
+
+    _reject_group_json(ctx)
+    _, debug = _merged_config_flags(ctx, False, debug)
 
     def action() -> None:
         stored = set_setting(_init_switcher(debug).backup_dir, key, value)
@@ -300,11 +327,15 @@ def config_set(
 
 @config_app.command("unset")
 def config_unset(
+    ctx: typer.Context,
     key: str = typer.Argument(..., metavar="KEY"),
     debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
 ) -> None:
     """Remove one setting (revert to the default)."""
     from claude_swap.settings import format_setting_value, setting_spec, unset_setting
+
+    _reject_group_json(ctx)
+    _, debug = _merged_config_flags(ctx, False, debug)
 
     def action() -> None:
         if unset_setting(_init_switcher(debug).backup_dir, key):
@@ -318,10 +349,14 @@ def config_unset(
 
 @config_app.command("path")
 def config_path(
+    ctx: typer.Context,
     debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
 ) -> None:
     """Print the settings.json location."""
     from claude_swap.settings import settings_path
+
+    _reject_group_json(ctx)
+    _, debug = _merged_config_flags(ctx, False, debug)
 
     def action() -> None:
         print(settings_path(_init_switcher(debug).backup_dir))

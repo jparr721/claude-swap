@@ -149,3 +149,35 @@ def test_bare_config_lists_settings(
     result = runner.invoke(app, ["config"])
     assert result.exit_code == 0
     assert "autoswitch.threshold" in result.stdout
+
+
+def test_group_level_json_flag_applies_to_get(
+    stub_switcher: type[_StubSwitcher], tmp_path: Path
+) -> None:
+    _StubSwitcher.backup_dir_override = tmp_path
+    result = runner.invoke(app, ["config", "--json", "get", "autoswitch.threshold"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["key"] == "autoswitch.threshold"
+    assert payload["isSet"] is False
+    assert "value" in payload
+
+
+def test_group_level_json_flag_rejected_for_set(
+    stub_switcher: type[_StubSwitcher], tmp_path: Path
+) -> None:
+    _StubSwitcher.backup_dir_override = tmp_path
+    result = runner.invoke(
+        app, ["config", "--json", "set", "autoswitch.threshold", "80"]
+    )
+    assert result.exit_code == 2
+
+
+def test_post_verb_json_flag_still_works(
+    stub_switcher: type[_StubSwitcher], tmp_path: Path
+) -> None:
+    _StubSwitcher.backup_dir_override = tmp_path
+    result = runner.invoke(app, ["config", "get", "autoswitch.threshold", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["key"] == "autoswitch.threshold"
