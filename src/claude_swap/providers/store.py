@@ -303,6 +303,25 @@ class ProviderAccountStore:
             return None
         return Path(os.path.realpath(self.auth_path))
 
+    def materialize_active_auth(self) -> None:
+        """Replace the active-auth symlink with a real file holding its content.
+
+        The symlink target lives inside the provider store; deleting the store
+        (purge) would otherwise leave the frontend's auth file dangling and
+        log the user out. A no-op when the active auth is already a real file
+        or absent; a dangling symlink is removed outright.
+        """
+        target = self._active_symlink_target()
+        if target is None:
+            return
+        try:
+            text = target.read_text(encoding="utf-8")
+        except OSError:
+            self.auth_path.unlink(missing_ok=True)
+            return
+        self.auth_path.unlink(missing_ok=True)
+        self._write_active_auth(text)
+
     def _adopt_active_real_file(self, data: dict[str, Any]) -> None:
         """Fold a pre-symlink real auth.json into its managed account's target.
 

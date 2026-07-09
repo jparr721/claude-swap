@@ -806,3 +806,35 @@ def test_relogin_needed_appears_in_human_output(
     out = capsys.readouterr().out
     assert "re-login needed" in out
     assert "cswap codex openai add" in out
+
+
+def test_materialize_active_auth_replaces_symlink_with_real_file(temp_home: Path) -> None:
+    store = _codex_store()
+    store._setup_directories()
+    store._init_sequence_file()
+    payload = _codex_auth("acct-1")
+    _write(store._auth_backup_path("1"), payload)
+    store._activate_auth_symlink(store._auth_backup_path("1"))
+    assert store.auth_path.is_symlink()
+
+    store.materialize_active_auth()
+
+    assert not store.auth_path.is_symlink()
+    assert json.loads(store.auth_path.read_text(encoding="utf-8")) == payload
+
+
+def test_materialize_active_auth_is_a_noop_without_symlink(temp_home: Path) -> None:
+    store = _codex_store()
+    store.materialize_active_auth()  # no auth at all: must not raise
+    assert not store.auth_path.exists()
+
+
+def test_materialize_active_auth_removes_dangling_symlink(temp_home: Path) -> None:
+    store = _codex_store()
+    store._setup_directories()
+    store._activate_auth_symlink(store.auth_dir / "account-9.json")  # target never written
+
+    store.materialize_active_auth()
+
+    assert not store.auth_path.is_symlink()
+    assert not store.auth_path.exists()

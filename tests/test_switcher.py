@@ -25,6 +25,7 @@ from claude_swap.macos_keychain import KeychainError
 from claude_swap.models import Platform
 from claude_swap.paths import get_backup_root, get_credentials_path
 from claude_swap.credentials import ActiveCredentials
+from claude_swap.providers.registry import get_provider
 from claude_swap.switcher import (
     CLAUDE_CODE_KEYCHAIN_SERVICE,
     ClaudeAccountSwitcher,
@@ -2991,6 +2992,32 @@ class TestPurge:
             call("claude-code", "account-1-user@example.com"),
             call("claude-code", "account-None-user@example.com"),
         ])
+
+    def test_purge_materializes_active_codex_auth(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Purge must not leave the codex auth symlink dangling.
+
+        The active ~/.codex/auth.json symlink points at account-N.json inside
+        the backup root purge deletes; without materializing it first, purge
+        logs the user out of codex despite the prompt claiming otherwise.
+        """
+        codex = get_provider("codex", "openai")
+        codex._setup_directories()
+        codex._init_sequence_file()
+        payload = {"auth_mode": "chatgpt", "tokens": {"account_id": "acct-1", "access_token": "t"}}
+        codex._auth_backup_path("1").parent.mkdir(parents=True, exist_ok=True)
+        codex._auth_backup_path("1").write_text(json.dumps(payload), encoding="utf-8")
+        codex._activate_auth_symlink(codex._auth_backup_path("1"))
+        assert codex.auth_path.is_symlink()
+
+        switcher = ClaudeAccountSwitcher()
+        with patch("builtins.input", return_value="y"):
+            switcher.purge()
+
+        assert not codex.auth_path.is_symlink()
+        assert json.loads(codex.auth_path.read_text(encoding="utf-8")) == payload
+        assert not codex.state_dir.exists()
 
 
 # ---------------------------------------------------------------------------

@@ -2908,13 +2908,26 @@ class ClaudeAccountSwitcher:
         if session_dirs:
             print("  - All session profiles and their Keychain entries")
         print()
-        print(dimmed("Note: This does NOT affect your current Claude Code login."))
+        print(
+            dimmed(
+                "Note: Your current Claude Code and provider (codex/opencode) "
+                "logins are preserved."
+            )
+        )
         print()
 
         confirm = input("Are you sure you want to purge all data? [y/N] ")
         if confirm.lower() != "y":
             print(dimmed("Cancelled"))
             return
+
+        # Codex-style providers symlink their live auth file into the backup
+        # root; deleting it would leave that symlink dangling and log the
+        # frontend out. Materialize each active auth back to a real file first.
+        from claude_swap.providers.registry import managed_aggregate_providers
+
+        for provider_store in managed_aggregate_providers():
+            provider_store.materialize_active_auth()
 
         removed_items = []
 
