@@ -35,7 +35,7 @@ cswap opencode openai add
 cswap opencode openai remove 2
 ```
 
-Codex/OpenAI and opencode/OpenAI switching is intentionally refused. These providers track snapshots for list/status/remove and usage display, but stale OpenAI OAuth snapshots must not be restored into active auth files because they can invalidate Codex, opencode, and browser sessions. To change account, run `codex login` or `opencode auth login`, then add the active account again.
+Codex/OpenAI switching uses a symlink model, not byte snapshots (see `docs/superpowers/plans/2026-07-08-codex-per-account-auth.md`). Byte-snapshot restore is unsafe for OpenAI's rotating single-use refresh tokens: Codex writes `auth.json` in place (`openai/codex` `codex-rs/login/src/auth/storage.rs:202-219`, open+truncate+write, no rename), so `~/.codex/auth.json` is made a symlink to a per-account credential file that Codex rotates in place. `switch` repoints that symlink (no login/logout/revoke, no byte copy); `add` drives `codex login --device-auth` writing through the symlink into a fresh per-account file. opencode/OpenAI switching is still intentionally refused: its `auth.json` is multi-provider (openai + openrouter), so it needs per-`OPENCODE_DATA_HOME` isolation instead (a separate follow-on). It tracks snapshots for list/status/remove and usage display; to change its account, run `opencode auth login`, then add the active account again.
 
 Compatibility aliases remain for existing users:
 

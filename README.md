@@ -90,30 +90,28 @@ cswap claude default switch --to 2
 
 Top-level Claude commands such as `cswap list` and `cswap switch 2` remain supported. Codex and opencode docs use the canonical provider-first commands.
 
-Codex support is separate from Claude account switching. Log into Codex normally, then snapshot that active auth:
+Codex support is separate from Claude account switching. `cswap` adds a Codex account by driving Codex's own device-auth login, so you never have to run `codex login` by hand:
 
 ```bash
-codex login
-cswap codex openai add --label work
+cswap codex openai add --label work        # runs `codex login --device-auth`, then registers it
+cswap codex openai add --label personal     # add a second account the same way
 ```
 
-Log into another Codex account and add it the same way:
+Switch between them instantly and non-destructively:
 
 ```bash
-codex login
-cswap codex openai add --label personal
-```
-
-Check or remove Codex snapshots:
-
-```bash
+cswap codex openai switch --to personal     # or: --to <number>; no argument rotates
 cswap codex openai list
 cswap codex openai status
 cswap codex openai remove work
 cswap codex openai list --json
 ```
 
-opencode uses a different auth file from Codex. Log into opencode normally, then manage it separately:
+Switching only repoints the `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`) symlink at the chosen account's stored credential file; it runs no login, no logout, and no token revoke, and copies no bytes. Each account's credential lives in its own file that Codex rotates in place, so switching never replays a spent refresh token. Everything else under `~/.codex` (config, sessions, skills) stays shared - only `auth.json` is per-account.
+
+One thing no tool can change: chatgpt.com is a single session per browser profile, so the first `codex login` for an account signs that browser into that account. Day-to-day CLI switching after that never touches the browser; use separate browser profiles if you need both accounts signed in at once.
+
+opencode uses a different, multi-provider auth file and still uses the snapshot model (its switch is intentionally refused pending its own per-`OPENCODE_DATA_HOME` change). Log into opencode normally and manage it separately:
 
 ```bash
 opencode auth login
@@ -121,7 +119,7 @@ cswap opencode openai add --label work
 cswap opencode openai list
 ```
 
-`cswap ls` shows Claude accounts and, when present, separate Codex and opencode account sections. Codex auth stays in `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`). opencode auth stays in `$OPENCODE_DATA_HOME/auth.json` (default `~/.local/share/opencode/auth.json`). OpenAI OAuth snapshots are tracked for status and usage, but restoring them into active auth files is intentionally refused because stale refresh-token snapshots can invalidate Codex, opencode, and browser sessions. To change Codex or opencode accounts, use `codex login` or `opencode auth login`, then run the matching `cswap ... add` command again.
+`cswap ls` shows Claude accounts and, when present, separate Codex and opencode account sections. opencode auth stays in `$OPENCODE_DATA_HOME/auth.json` (default `~/.local/share/opencode/auth.json`).
 
 ### Automatic switching
 
