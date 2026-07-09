@@ -111,6 +111,13 @@ Switching only repoints the `$CODEX_HOME/auth.json` (default `~/.codex/auth.json
 
 One thing no tool can change: chatgpt.com is a single session per browser profile, so the first `codex login` for an account signs that browser into that account. Day-to-day CLI switching after that never touches the browser; use separate browser profiles if you need both accounts signed in at once.
 
+Inactive Codex accounts keep live usage: when an inactive account's access
+token expires, claude-swap refreshes it against the OpenAI token endpoint
+(the same grant the Codex CLI uses) and stores the rotated token in that
+account's slot. The active account is never touched - the Codex CLI owns and
+refreshes it in place. An account whose refresh token has been revoked shows
+"re-login needed"; re-add it with `cswap codex openai add`.
+
 opencode uses a different, multi-provider auth file and still uses the snapshot model (its switch is intentionally refused pending its own per-`OPENCODE_DATA_HOME` change). Log into opencode normally and manage it separately:
 
 ```bash
