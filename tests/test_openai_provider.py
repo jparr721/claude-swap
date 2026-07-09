@@ -160,3 +160,158 @@ def test_opencode_access_token_never_expired() -> None:
     backend = OpencodeOpenAIBackend()
     text = json.dumps({"openai": {"access": _jwt_with_exp(1_000_000_000), "refresh": "r"}})
     assert backend.access_token_expired(text) is False
+
+
+import io
+from claude_swap.providers.openai import (
+    CODEX_OAUTH_CLIENT_ID,
+    CODEX_REFRESH_TOKEN_URL,
+)
+from claude_swap.providers import openai as openai_module
+from claude_swap.providers.types import RefreshResult
+
+
+class _FakeResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+
+def _http_error(code: int, body: str) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        url=CODEX_REFRESH_TOKEN_URL,
+        code=code,
+        msg="err",
+        hdrs=None,
+        fp=io.BytesIO(body.encode("utf-8")),
+    )
+
+
+def _full_codex_auth_text() -> str:
+    return json.dumps(
+        {
+            "auth_mode": "chatgpt",
+            "agent_identity": {"kind": "personal"},
+            "custom_future_field": "keep-me",
+            "tokens": {
+                "account_id": "acct-1",
+                "access_token": "old-access",
+                "refresh_token": "old-refresh",
+                "id_token": "old-id",
+            },
+            "last_refresh": "2026-01-01T00:00:00Z",
+        }
+    )
+
+
+def test_refresh_auth_success_rotates_and_preserves_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = CodexOpenAIBackend()
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return _FakeResponse({"access_token": "new-access", "refresh_token": "new-refresh"})
+
+    monkeypatch.setattr(openai_module.urllib.request, "urlopen", fake_urlopen)
+    result = backend.refresh_auth(_full_codex_auth_text(), 10.0)
+
+    assert result.error is None
+    assert captured["url"] == CODEX_REFRESH_TOKEN_URL
+    assert captured["body"] == {
+        "client_id": CODEX_OAUTH_CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": "old-refresh",
+        "scope": "openid profile email",
+    }
+    rotated = json.loads(result.auth_text)
+    assert rotated["tokens"]["access_token"] == "new-access"
+    assert rotated["tokens"]["refresh_token"] == "new-refresh"
+    assert rotated["tokens"]["id_token"] == "old-id"  # absent in response: retained
+    assert rotated["tokens"]["account_id"] == "acct-1"
+    assert rotated["auth_mode"] == "chatgpt"
+    assert rotated["agent_identity"] == {"kind": "personal"}
+    assert rotated["custom_future_field"] == "keep-me"
+    assert rotated["last_refresh"] != "2026-01-01T00:00:00Z"
+
+
+def test_refresh_auth_400_invalid_grant_is_permanent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = CodexOpenAIBackend()
+
+    def fake_urlopen(request, timeout):
+        raise _http_error(400, '{"error": "invalid_grant"}')
+
+    monkeypatch.setattr(openai_module.urllib.request, "urlopen", fake_urlopen)
+    result = backend.refresh_auth(_full_codex_auth_text(), 10.0)
+    assert result == RefreshResult(None, "invalid_grant")
+
+
+def test_refresh_auth_reused_token_marker_is_permanent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = CodexOpenAIBackend()
+
+    def fake_urlopen(request, timeout):
+        raise _http_error(401, '{"error": "refresh_token_reused"}')
+
+    monkeypatch.setattr(openai_module.urllib.request, "urlopen", fake_urlopen)
+    assert backend.refresh_auth(_full_codex_auth_text(), 10.0).error == "invalid_grant"
+
+
+def test_refresh_auth_5xx_with_invalid_grant_body_stays_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = CodexOpenAIBackend()
+
+    def fake_urlopen(request, timeout):
+        raise _http_error(500, '{"error": "invalid_grant"}')
+
+    monkeypatch.setattr(openai_module.urllib.request, "urlopen", fake_urlopen)
+    assert backend.refresh_auth(_full_codex_auth_text(), 10.0).error == "transient"
+
+
+def test_refresh_auth_network_error_is_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = CodexOpenAIBackend()
+
+    def fake_urlopen(request, timeout):
+        raise urllib.error.URLError("no route")
+
+    monkeypatch.setattr(openai_module.urllib.request, "urlopen", fake_urlopen)
+    assert backend.refresh_auth(_full_codex_auth_text(), 10.0).error == "transient"
+
+
+def test_refresh_auth_without_refresh_token() -> None:
+    backend = CodexOpenAIBackend()
+    text = json.dumps({"tokens": {"account_id": "a", "access_token": "x"}})
+    assert backend.refresh_auth(text, 10.0) == RefreshResult(
+        None, "no_refresh_token"
+    )
+
+
+def test_refresh_auth_api_key_only_auth() -> None:
+    backend = CodexOpenAIBackend()
+    text = json.dumps({"openai_api_key": "sk-x"})
+    assert backend.refresh_auth(text, 10.0).error == "no_refresh_token"
+
+
+def test_opencode_refresh_auth_is_inert() -> None:
+    backend = OpencodeOpenAIBackend()
+    text = json.dumps({"openai": {"access": "a", "refresh": "r"}})
+    assert backend.refresh_auth(text, 10.0) == RefreshResult(
+        None, "no_refresh_token"
+    )

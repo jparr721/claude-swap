@@ -5,19 +5,26 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Callable
 
 from claude_swap.exceptions import ConfigError
-from claude_swap.providers.types import AuthMetadata, UsageFetchError
+from claude_swap.providers.types import AuthMetadata, RefreshResult, UsageFetchError
 
 OPENAI_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 OPENAI_USAGE_TIMEOUT_S = 10.0
 
 # Refresh decisions use the same 5-minute pre-expiry buffer as oauth.py.
 ACCESS_TOKEN_EXPIRY_BUFFER_S = 5 * 60
+
+# Source-verified from openai/codex codex-rs/login/src/auth/manager.rs @ rust-v0.143.0.
+CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CODEX_REFRESH_TOKEN_URL = "https://auth.openai.com/oauth/token"
+
+_logger = logging.getLogger("claude-swap")
 
 
 def _fingerprint(text: str) -> str:
@@ -233,6 +240,84 @@ class CodexOpenAIBackend:
         now = datetime.now(timezone.utc).timestamp()
         return now + ACCESS_TOKEN_EXPIRY_BUFFER_S >= exp
 
+    def refresh_auth(self, auth_text: str, timeout_s: float) -> RefreshResult:
+        """Refresh an expired Codex access token via the OpenAI token endpoint.
+
+        Mirrors codex-rs/login/src/auth/manager.rs (rust-v0.143.0): same client
+        id, endpoint, and update-if-present semantics for the rotated fields
+        (all three are Optional upstream). Every other field in the file
+        (auth_mode, agent_identity, tokens.account_id, unknown keys) is
+        preserved untouched.
+        """
+        try:
+            data = json.loads(auth_text)
+        except json.JSONDecodeError:
+            return RefreshResult(None, "no_refresh_token")
+        if not isinstance(data, dict):
+            return RefreshResult(None, "no_refresh_token")
+        tokens = data.get("tokens")
+        if not isinstance(tokens, dict):
+            return RefreshResult(None, "no_refresh_token")
+        refresh_token = tokens.get("refresh_token")
+        if not isinstance(refresh_token, str) or not refresh_token:
+            return RefreshResult(None, "no_refresh_token")
+
+        body = json.dumps(
+            {
+                "client_id": CODEX_OAUTH_CLIENT_ID,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "scope": "openid profile email",
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            CODEX_REFRESH_TOKEN_URL,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "claude-swap/codex-openai-refresh",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_s) as response:
+                resp_data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            resp_body = exc.read().decode(errors="replace") if hasattr(exc, "read") else ""
+            _logger.debug(
+                "codex token refresh failed: status=%s body=%s", exc.code, resp_body[:500]
+            )
+            # Permanent only when the server itself rejected the grant: a 4xx
+            # AND an explicit marker in the body. Anything ambiguous stays
+            # transient - a misclassified permanent would wrongly quarantine a
+            # live token (mirrors oauth.py).
+            if exc.code in (400, 401, 403) and any(
+                marker in resp_body
+                for marker in (
+                    "invalid_grant",
+                    "invalid_client",
+                    "refresh_token_reused",
+                    "refresh_token_invalidated",
+                )
+            ):
+                return RefreshResult(None, "invalid_grant")
+            return RefreshResult(None, "transient")
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            _logger.debug("codex token refresh failed: %r", exc)
+            return RefreshResult(None, "transient")
+
+        if not isinstance(resp_data, dict):
+            return RefreshResult(None, "transient")
+        for field in ("access_token", "refresh_token", "id_token"):
+            value = resp_data.get(field)
+            if isinstance(value, str) and value:
+                tokens[field] = value
+        data["tokens"] = tokens
+        data["last_refresh"] = (
+            datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        )
+        return RefreshResult(json.dumps(data, indent=2) + "\n", None)
+
 
 class OpencodeOpenAIBackend:
     backend_id = "openai"
@@ -277,3 +362,7 @@ class OpencodeOpenAIBackend:
         # opencode token refresh is deferred (different client id and auth
         # shape); never triggering the refresh path keeps behavior unchanged.
         return False
+
+    def refresh_auth(self, auth_text: str, timeout_s: float) -> RefreshResult:
+        # Deferred: opencode uses a different OAuth client id and auth shape.
+        return RefreshResult(None, "no_refresh_token")
