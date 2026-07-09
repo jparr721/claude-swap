@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -556,7 +557,90 @@ class ProviderAccountStore:
             detail += f" ({entry.last_error})"
         return [dimmed(detail)]
 
+    def _run_headless_login(self) -> None:
+        """Drive the frontend's headless login (writes through the active symlink)."""
+        argv = self.definition.frontend.headless_login_argv()
+        if argv is None:
+            raise ConfigError(
+                f"{self.definition.display_name} does not support headless login"
+            )
+        try:
+            result = subprocess.run(argv, check=False)  # inherits stdio: user sees URL + code
+        except FileNotFoundError as exc:
+            raise ConfigError(
+                f"{argv[0]} CLI not found on PATH; install it or run "
+                f"'{' '.join(argv)}' manually"
+            ) from exc
+        if result.returncode != 0:
+            raise ConfigError(f"'{' '.join(argv)}' failed (exit {result.returncode})")
+
+    def _add_account_via_login(self, label: str | None, slot: int | None) -> None:
+        """Add an account by driving a headless login into a fresh per-account file.
+
+        Repoints the active symlink at the target, runs the login (which writes
+        the credential through the symlink), then registers it. Preserves the
+        current managed login before repointing and restores it if login fails,
+        so a tracked account is never orphaned and a cancelled login never leaves
+        a dangling active auth file.
+        """
+        self._setup_directories()
+        self._init_sequence_file()
+        with FileLock(self.lock_file):
+            data = self._sequence_data()
+            if slot is not None and slot < 1:
+                raise ConfigError(
+                    f"{self.definition.display_name} slot number must be >= 1"
+                )
+            account_num = str(slot) if slot is not None else str(self._next_account_number(data))
+            active_text = self._read_active_auth()
+            prior_num = None
+            if active_text is not None:
+                prior_num = self._current_account_number(data, active_text)
+                if prior_num is not None and not self.auth_path.is_symlink():
+                    self._write_account_auth(prior_num, active_text)
+            target = self._auth_backup_path(account_num)
+            target.unlink(missing_ok=True)  # empty target => codex login revokes nothing
+            self._activate_auth_symlink(target)
+
+        try:
+            self._run_headless_login()
+        except ConfigError:
+            with FileLock(self.lock_file):
+                if prior_num is not None:
+                    self._activate_auth_symlink(self._auth_backup_path(prior_num))
+                else:
+                    self.auth_path.unlink(missing_ok=True)
+            raise
+
+        with FileLock(self.lock_file):
+            data = self._sequence_data()
+            text = self._read_required_active_auth()  # reads through the symlink -> target
+            metadata = self._metadata(text)
+            existing_account = data.get("accounts", {}).get(account_num, {})
+            if label is None and existing_account:
+                resolved_label = _safe_str(existing_account.get("label"))
+            else:
+                resolved_label = self._derive_label(label, metadata, account_num)
+            duplicate = self._account_by_label(data, resolved_label)
+            if duplicate is not None and duplicate != account_num:
+                raise ValidationError(
+                    f"{self.definition.display_name} account label '{resolved_label}' already "
+                    f"exists as Account-{duplicate}"
+                )
+            self._set_account_record(data, account_num, resolved_label, metadata)
+            data["activeAccountNumber"] = int(account_num)
+            data["lastUpdated"] = get_timestamp()
+            self._write_json(self.sequence_file, data)
+
+        print(
+            f"{accent('Added')} {self.definition.display_name} Account-{account_num}: "
+            f"{resolved_label}"
+        )
+
     def add_account(self, label: str | None, slot: int | None) -> None:
+        if self.definition.switch_mode == "symlink":
+            self._add_account_via_login(label, slot)
+            return
         active_auth = self._read_required_active_auth()
         metadata = self._metadata(active_auth)
         self._setup_directories()

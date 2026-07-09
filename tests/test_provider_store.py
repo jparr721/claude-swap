@@ -72,7 +72,6 @@ def test_codex_store_adds_and_lists_account(
     temp_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     auth_payload = _codex_auth("acct-1")
-    _write(temp_home / ".codex" / "auth.json", auth_payload)
     store = _codex_store()
     backend_calls: list[tuple[str, float]] = []
 
@@ -81,6 +80,11 @@ def test_codex_store_adds_and_lists_account(
         return {"windows": [{"label": "Monthly", "pct": 12.0}]}
 
     monkeypatch.setattr(store.definition.backend, "fetch_usage", _fake_fetch_usage)
+
+    def fake_login() -> None:
+        store.auth_path.write_text(json.dumps(auth_payload), encoding="utf-8")
+
+    monkeypatch.setattr(store, "_run_headless_login", fake_login)
 
     store.add_account(label="work", slot=1)
     payload = store.list_accounts(json_output=True)
@@ -331,3 +335,68 @@ def test_current_account_number_reads_symlink_target(temp_home: Path) -> None:
     store._activate_auth_symlink(store._auth_backup_path("2"))
 
     assert store._current_account_number(store._sequence_data(), None) == "2"
+
+
+def test_codex_add_runs_device_login_then_registers(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _codex_store()
+
+    def fake_login() -> None:
+        # Simulate `codex login --device-auth` writing through the active symlink.
+        store.auth_path.write_text(json.dumps(_codex_auth("acct-new")), encoding="utf-8")
+
+    monkeypatch.setattr(store, "_run_headless_login", fake_login)
+
+    store.add_account(label="work", slot=1)
+
+    assert store.auth_path.is_symlink()
+    assert store.auth_path.resolve() == store._auth_backup_path("1").resolve()
+    assert '"acct-new"' in store._auth_backup_path("1").read_text(encoding="utf-8")
+    data = store._sequence_data()
+    assert data["accounts"]["1"]["label"] == "work"
+    assert data["activeAccountNumber"] == 1
+
+
+def test_codex_add_preserves_prior_managed_login(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _codex_store()
+    store._setup_directories()
+    store._init_sequence_file()
+    data = store._sequence_data()
+    # account 1 is the current live real auth.json (freshest copy)
+    store._set_account_record(data, "1", "one", store._metadata(json.dumps(_codex_auth("acct-1"))))
+    store._write_json(store.sequence_file, data)
+    fresh_one = {"auth_mode": "chatgpt", "tokens": {"account_id": "acct-1", "access_token": "FRESH1"}}
+    _write(store.auth_path, fresh_one)
+
+    def fake_login() -> None:
+        store.auth_path.write_text(json.dumps(_codex_auth("acct-2")), encoding="utf-8")
+
+    monkeypatch.setattr(store, "_run_headless_login", fake_login)
+
+    store.add_account(label="two", slot=2)
+
+    # account 1's fresh live bytes were preserved into its target before repointing
+    assert '"FRESH1"' in store._auth_backup_path("1").read_text(encoding="utf-8")
+    assert store.auth_path.resolve() == store._auth_backup_path("2").resolve()
+
+
+def test_codex_add_restores_symlink_when_login_fails(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _codex_store()
+    store._setup_directories()
+    store._init_sequence_file()
+    data = store._sequence_data()
+    _write(store._auth_backup_path("1"), _codex_auth("acct-1"))
+    store._set_account_record(data, "1", "one", store._metadata(json.dumps(_codex_auth("acct-1"))))
+    store._write_json(store.sequence_file, data)
+    store._activate_auth_symlink(store._auth_backup_path("1"))
+
+    def boom() -> None:
+        raise ConfigError("codex CLI not found; run 'codex login --device-auth' manually")
+
+    monkeypatch.setattr(store, "_run_headless_login", boom)
+
+    with pytest.raises(ConfigError, match="codex CLI not found"):
+        store.add_account(label=None, slot=2)
+
+    # prior account-1 symlink restored; not left dangling on account-2
+    assert store.auth_path.is_symlink()
+    assert store.auth_path.resolve() == store._auth_backup_path("1").resolve()

@@ -174,7 +174,6 @@ def test_fetch_opencode_usage_uses_openai_oauth_fields(
 def test_codex_wrapper_uses_provider_store_and_compat_usage_hook(
     temp_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_codex_auth(temp_home, _codex_auth("acct-1"))
     switcher = CodexAccountSwitcher()
     calls: list[tuple[str, float]] = []
 
@@ -183,6 +182,11 @@ def test_codex_wrapper_uses_provider_store_and_compat_usage_hook(
         return {"windows": [{"label": "3h", "pct": 25.0}]}
 
     monkeypatch.setattr("claude_swap.codex.fetch_codex_usage", fake_fetch)
+
+    def fake_login() -> None:
+        switcher._store.auth_path.write_text(json.dumps(_codex_auth("acct-1")), encoding="utf-8")
+
+    monkeypatch.setattr(switcher._store, "_run_headless_login", fake_login)
 
     switcher.add_account(label="work", slot=1)
     payload = switcher.list_accounts(json_output=True)
@@ -224,8 +228,15 @@ def test_opencode_wrapper_refuses_to_restore_openai_oauth_snapshot(
     }
 
 
-def test_codex_wrapper_missing_auth_uses_provider_error(temp_home: Path) -> None:
+def test_codex_wrapper_add_surfaces_login_failure(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     switcher = CodexAccountSwitcher()
 
-    with pytest.raises(ConfigError, match="No active codex auth found"):
+    def boom() -> None:
+        raise ConfigError("codex CLI not found; run 'codex login --device-auth' manually")
+
+    monkeypatch.setattr(switcher._store, "_run_headless_login", boom)
+
+    with pytest.raises(ConfigError, match="codex CLI not found"):
         switcher.add_account(label=None, slot=None)
