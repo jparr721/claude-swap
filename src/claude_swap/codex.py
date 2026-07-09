@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from claude_swap.providers.openai import (
+from claude_swap.providers.openai import (  # noqa: F401  (usage constants re-exported for tests)
     OPENAI_USAGE_TIMEOUT_S as CODEX_USAGE_TIMEOUT_S,
     OPENAI_USAGE_URL as CODEX_USAGE_URL,
     UsageFetchError as _UsageFetchError,
