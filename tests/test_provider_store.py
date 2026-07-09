@@ -49,6 +49,7 @@ def _codex_store() -> ProviderAccountStore:
             backend=CodexOpenAIBackend(),
             state_dir=get_provider_store_root(ref.frontend, ref.backend),
             default_label_prefix="codex-openai-account",
+            switch_mode="symlink",
         )
     )
 
@@ -62,6 +63,7 @@ def _opencode_store() -> ProviderAccountStore:
             backend=OpencodeOpenAIBackend(),
             state_dir=get_provider_store_root(ref.frontend, ref.backend),
             default_label_prefix="opencode-openai-account",
+            switch_mode="snapshot-refused",
         )
     )
 

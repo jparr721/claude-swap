@@ -17,6 +17,7 @@ def _codex_openai_definition() -> ProviderDefinition:
         backend=CodexOpenAIBackend(),
         state_dir=get_provider_store_root(ref.frontend, ref.backend),
         default_label_prefix="codex-openai-account",
+        switch_mode="symlink",
     )
 
 
@@ -28,6 +29,7 @@ def _opencode_openai_definition() -> ProviderDefinition:
         backend=OpencodeOpenAIBackend(),
         state_dir=get_provider_store_root(ref.frontend, ref.backend),
         default_label_prefix="opencode-openai-account",
+        switch_mode="snapshot-refused",
     )
 
 

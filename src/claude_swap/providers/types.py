@@ -35,6 +35,9 @@ class FrontendAdapter(Protocol):
     def active_auth_path(self) -> Path:
         raise NotImplementedError
 
+    def headless_login_argv(self) -> list[str] | None:
+        raise NotImplementedError
+
 
 class BackendAdapter(Protocol):
     backend_id: str
@@ -56,6 +59,7 @@ class ProviderDefinition:
     backend: BackendAdapter
     state_dir: Path
     default_label_prefix: str
+    switch_mode: str
 
     @property
     def display_name(self) -> str:

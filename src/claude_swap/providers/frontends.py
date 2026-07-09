@@ -16,6 +16,9 @@ class CodexFrontend:
     def active_auth_path(self) -> Path:
         return get_codex_auth_path()
 
+    def headless_login_argv(self) -> list[str] | None:
+        return ["codex", "login", "--device-auth"]
+
 
 class OpencodeFrontend:
     provider_ref = ProviderRef("opencode", "openai")
@@ -24,3 +27,6 @@ class OpencodeFrontend:
 
     def active_auth_path(self) -> Path:
         return get_opencode_auth_path()
+
+    def headless_login_argv(self) -> list[str] | None:
+        return None
