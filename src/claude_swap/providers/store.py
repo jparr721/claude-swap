@@ -378,6 +378,12 @@ class ProviderAccountStore:
     def _current_account_number(
         self, data: dict[str, Any], active_auth: str | None
     ) -> str | None:
+        if active_auth is None:
+            target = self._active_symlink_target()
+            if target is not None:
+                for account_num in data.get("accounts", {}):
+                    if self._auth_backup_path(account_num).resolve() == target:
+                        return account_num
         auth_text = active_auth
         if auth_text is None:
             auth_text = self._read_active_auth()

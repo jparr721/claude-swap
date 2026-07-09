@@ -318,3 +318,16 @@ def test_opencode_switch_still_refused(temp_home: Path) -> None:
     store = _opencode_store()
     with pytest.raises(ConfigError, match="cannot safely restore stored OpenAI OAuth"):
         store.switch("1", json_output=False)
+
+
+def test_current_account_number_reads_symlink_target(temp_home: Path) -> None:
+    store = _codex_store()
+    store._setup_directories()
+    store._init_sequence_file()
+    data = store._sequence_data()
+    _write(store._auth_backup_path("2"), _codex_auth("acct-2"))
+    store._set_account_record(data, "2", "two", store._metadata(json.dumps(_codex_auth("acct-2"))))
+    store._write_json(store.sequence_file, data)
+    store._activate_auth_symlink(store._auth_backup_path("2"))
+
+    assert store._current_account_number(store._sequence_data(), None) == "2"
