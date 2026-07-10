@@ -54,6 +54,7 @@ version = "0.19.0"
 source = { editable = "." }
 dependencies = [
     { name = "keyring" },
+    { name = "rich" },
     { name = "truststore" },
     { name = "typer" },
 ]
@@ -66,6 +67,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "keyring", specifier = ">=25.0.0" },
+    { name = "rich", specifier = ">=13" },
     { name = "truststore", specifier = ">=0.10.4" },
     { name = "typer", specifier = ">=0.15" },
 ]
