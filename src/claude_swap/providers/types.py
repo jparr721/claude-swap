@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from claude_swap.usage_store import UsageEntry
+
 
 @dataclass(frozen=True)
 class AuthMetadata:
@@ -88,3 +90,13 @@ class ProviderDefinition:
 
 
 ProviderFactory = Callable[[], ProviderDefinition]
+
+
+@dataclass(frozen=True)
+class ProviderAccountRow:
+    """Display-grade row for one managed provider account."""
+
+    number: str
+    label: str
+    is_active: bool
+    usage: UsageEntry

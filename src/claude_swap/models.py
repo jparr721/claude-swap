@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from claude_swap.usage_store import UsageEntry
 
 if TYPE_CHECKING:
     from claude_swap.switcher import ClaudeAccountSwitcher
@@ -135,3 +138,39 @@ class SwitchTransaction:
 def get_timestamp() -> str:
     """Get current UTC timestamp in ISO format."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# Progress callback for usage collection: (done, total, label). Wired by the
+# CLI's fetch spinner; every non-CLI caller passes None.
+FetchProgress = Callable[[int, int, str], None]
+
+
+@dataclass(frozen=True)
+class ClaudeAccountRow:
+    """Display-grade row for one managed Claude account (human output only;
+    the JSON payload is built separately and stays decision-grade)."""
+
+    number: str
+    email: str
+    tag: str
+    is_active: bool
+    usage: UsageEntry
+    token_status: str | None
+
+
+@dataclass(frozen=True)
+class ClaudeListData:
+    first_run_needed: bool
+    rows: list[ClaudeAccountRow]
+
+
+@dataclass(frozen=True)
+class ClaudeStatusData:
+    """Display-grade status: email None = no active login; account_number
+    None = active login is not a managed account."""
+
+    email: str | None
+    account_number: str | None
+    tag: str
+    total_accounts: int
+    usage: UsageEntry | None
