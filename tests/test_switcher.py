@@ -4169,3 +4169,115 @@ class TestFormatUsageLines:
         usage = {"five_hour": {"pct": 7.0, "clock": "20:39", "countdown": "1h 30m"}}
         lines = _format_usage_lines(usage)
         assert lines == ["5h:   7%   resets 20:39         in 1h 30m"]
+
+
+class TestListData:
+    """list_data() returns display-grade rows without printing (Task 3)."""
+
+    def test_list_data_returns_display_rows(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
+    ):
+        sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
+        active_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-active"}})
+        backup_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-backup"}})
+
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._write_json(switcher.sequence_file, sample_sequence_data)
+
+        with patch.object(switcher, "_read_credentials", return_value=active_creds), \
+             patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
+             patch("claude_swap.oauth.try_fetch_usage_for_account",
+                   return_value=oauth.UsageOutcome(None)):
+            data = switcher.list_data(show_token_status=False, on_fetch=None)
+
+        assert data.first_run_needed is False
+        assert [r.number for r in data.rows] == ["1", "2"]
+        active = [r for r in data.rows if r.is_active]
+        assert len(active) == 1
+        assert all(r.token_status is None for r in data.rows)
+
+    def test_list_data_first_run_when_no_sequence(self, temp_home: Path):
+        switcher = ClaudeAccountSwitcher()
+        data = switcher.list_data(show_token_status=False, on_fetch=None)
+        assert data.first_run_needed is True
+        assert data.rows == []
+
+    def test_list_data_token_status_populated_on_request(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
+    ):
+        sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
+        active_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-active"}})
+        backup_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-backup"}})
+
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._write_json(switcher.sequence_file, sample_sequence_data)
+
+        with patch.object(switcher, "_read_credentials", return_value=active_creds), \
+             patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
+             patch("claude_swap.oauth.try_fetch_usage_for_account",
+                   return_value=oauth.UsageOutcome(None)), \
+             patch("claude_swap.oauth.build_token_status",
+                   return_value="oauth: fresh, refresh token yes"):
+            data = switcher.list_data(show_token_status=True, on_fetch=None)
+
+        assert any(r.token_status for r in data.rows)
+
+    def test_list_data_invokes_on_fetch_per_fetched_account(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
+    ):
+        sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
+        active_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-active"}})
+        backup_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-backup"}})
+
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._write_json(switcher.sequence_file, sample_sequence_data)
+
+        calls: list[tuple[int, int, str]] = []
+        with patch.object(switcher, "_read_credentials", return_value=active_creds), \
+             patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
+             patch("claude_swap.oauth.try_fetch_usage_for_account",
+                   return_value=oauth.UsageOutcome(None)):
+            switcher.list_data(
+                show_token_status=False,
+                on_fetch=lambda done, total, label: calls.append((done, total, label)),
+            )
+
+        assert calls  # every fetched account ticked
+        total = calls[0][1]
+        assert [c[0] for c in calls] == list(range(1, len(calls) + 1))
+        assert all(c[1] == total for c in calls)
+        assert all(isinstance(c[2], str) and c[2] for c in calls)
+
+
+class TestStatusData:
+    """status_data() returns display-grade status without printing (Task 3)."""
+
+    def test_status_data_managed(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
+    ):
+        sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
+        active_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-active"}})
+
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._write_json(switcher.sequence_file, sample_sequence_data)
+
+        with patch.object(switcher, "_read_active_credentials",
+                          return_value=ActiveCredentials(active_creds, False)), \
+             patch("claude_swap.oauth.try_fetch_usage_for_account",
+                   return_value=oauth.UsageOutcome(None)):
+            data = switcher.status_data()
+
+        assert data.email is not None
+        assert data.account_number is not None
+        assert data.total_accounts >= 1
+        assert data.usage is not None
+
+
+class TestFirstRunSetupIsPublic:
+    def test_first_run_setup_is_public(self, temp_home: Path):
+        switcher = ClaudeAccountSwitcher()
+        assert callable(switcher.first_run_setup)

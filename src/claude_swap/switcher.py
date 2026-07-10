@@ -45,6 +45,10 @@ from claude_swap.credentials import (  # noqa: F401  (constants re-exported for 
 from claude_swap.locking import FileLock
 from claude_swap.logging_config import setup_logging
 from claude_swap.models import (
+    ClaudeAccountRow,
+    ClaudeListData,
+    ClaudeStatusData,
+    FetchProgress,
     Platform,
     SwitchTransaction,
     get_timestamp,
@@ -1673,16 +1677,22 @@ class ClaudeAccountSwitcher:
         )
 
     def _run_usage_fetches(
-        self, infos: list[tuple[int, str, str, str, bool, str]]
+        self,
+        infos: list[tuple[int, str, str, str, bool, str]],
+        on_fetch: FetchProgress | None = None,
     ) -> dict[str, FetchRecord]:
         """Fetch the given accounts in parallel, staggering request starts so
         N accounts never hit the endpoint in the same instant."""
+        total = len(infos)
+
         def fetch_one(
             idx_info: tuple[int, tuple[int, str, str, str, bool, str]]
         ) -> tuple[str, FetchRecord]:
             idx, info = idx_info
             if idx and _FETCH_STAGGER_S:
                 time.sleep(idx * _FETCH_STAGGER_S)
+            if on_fetch is not None:
+                on_fetch(idx + 1, total, info[1])
             return str(info[0]), self._fetch_account_usage(info)
 
         with ThreadPoolExecutor() as executor:
@@ -1692,6 +1702,7 @@ class ClaudeAccountSwitcher:
         self,
         accounts_info: list[tuple[int, str, str, str, bool, str]],
         fetch: set[str] | None = None,
+        on_fetch: FetchProgress | None = None,
     ) -> dict[str, UsageEntry]:
         """Store-backed usage collection: one :class:`UsageEntry` per account.
 
@@ -1737,7 +1748,7 @@ class ClaudeAccountSwitcher:
         if to_fetch:
             store.claim(to_fetch, identities)
             records = self._run_usage_fetches(
-                [info_by_num[num] for num in to_fetch]
+                [info_by_num[num] for num in to_fetch], on_fetch=on_fetch
             )
             store.record(records, identities)
             for num, record in records.items():
@@ -1854,6 +1865,39 @@ class ClaudeAccountSwitcher:
             "accounts": accounts,
         }
 
+    def list_data(
+        self,
+        show_token_status: bool = False,
+        on_fetch: FetchProgress | None = None,
+    ) -> ClaudeListData:
+        """Display-grade account rows for the CLI's human renderer.
+
+        Unlike the JSON payload (decision-grade, ``decision_value()``), rows
+        carry the raw UsageEntry so the display can show stale measurements
+        annotated with age. No printing, no prompting - ``first_run_needed``
+        tells the caller the sequence file does not exist yet.
+        """
+        if not self.sequence_file.exists():
+            return ClaudeListData(first_run_needed=True, rows=[])
+        accounts_info = self._build_accounts_info()
+        entries = self._collect_usage_entries(accounts_info, fetch=None, on_fetch=on_fetch)
+        rows = []
+        for num, email, org_name, org_uuid, is_active, creds in accounts_info:
+            token_status = None
+            if show_token_status:
+                token_status = oauth.build_token_status(creds)
+            rows.append(
+                ClaudeAccountRow(
+                    number=str(num),
+                    email=email,
+                    tag=self._get_display_tag(email, org_name, org_uuid),
+                    is_active=is_active,
+                    usage=entries[str(num)],
+                    token_status=token_status,
+                )
+            )
+        return ClaudeListData(first_run_needed=False, rows=rows)
+
     def list_accounts(
         self,
         show_token_status: bool = False,
@@ -1874,7 +1918,7 @@ class ClaudeAccountSwitcher:
                     "accounts": [],
                 }
             print(dimmed("No accounts are managed yet."))
-            self._first_run_setup()
+            self.first_run_setup()
             return None
 
         accounts_info = self._build_accounts_info()
@@ -1996,6 +2040,31 @@ class ClaudeAccountSwitcher:
             "totalManagedAccounts": len(data.get("accounts", {})),
         }
 
+    def status_data(self) -> ClaudeStatusData:
+        """Display-grade status for the CLI's human renderer (see list_data)."""
+        identity = self._get_current_account()
+        if identity is None:
+            return ClaudeStatusData(
+                email=None, account_number=None, tag="", total_accounts=0, usage=None
+            )
+        current_email, current_org_uuid = identity
+        data = self._get_sequence_data_migrated()
+        account_num = (
+            self._find_account_slot(data, current_email, current_org_uuid) if data else None
+        )
+        if not data or not account_num:
+            return ClaudeStatusData(
+                email=current_email, account_number=None, tag="", total_accounts=0, usage=None
+            )
+        org_name = data["accounts"][account_num].get("organizationName", "") or ""
+        return ClaudeStatusData(
+            email=current_email,
+            account_number=str(account_num),
+            tag=self._get_display_tag(current_email, org_name, current_org_uuid),
+            total_accounts=len(data.get("accounts", {})),
+            usage=self._active_account_usage(account_num, current_email, current_org_uuid),
+        )
+
     def status(self, json_output: bool = False) -> dict | None:
         """Display current account status (or return the schema-v1 payload)."""
         if json_output:
@@ -2034,7 +2103,7 @@ class ClaudeAccountSwitcher:
             print(f"{bolded('Status:')} {current_email} {dimmed('(not managed)')}")
         return None
 
-    def _first_run_setup(self) -> None:
+    def first_run_setup(self) -> None:
         """First-run setup workflow."""
         identity = self._get_current_account()
 

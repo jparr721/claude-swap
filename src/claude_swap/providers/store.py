@@ -16,12 +16,13 @@ from typing import Any
 from claude_swap import oauth
 from claude_swap.exceptions import AccountNotFoundError, ConfigError, LockError, ValidationError
 from claude_swap.locking import FileLock
-from claude_swap.models import get_timestamp
+from claude_swap.models import FetchProgress, get_timestamp
 from claude_swap.json_output import SCHEMA_VERSION, USAGE_RELOGIN_REQUIRED, usage_freshness_fields
 from claude_swap.printer import accent, bolded, dimmed, format_age, muted
 from claude_swap.providers.openai import OPENAI_USAGE_TIMEOUT_S
 from claude_swap.providers.types import (
     AuthMetadata,
+    ProviderAccountRow,
     ProviderDefinition,
     UsageFetchError,
 )
@@ -597,7 +598,9 @@ class ProviderAccountStore:
             )
             return False
 
-    def _collect_usage_entries(self, data: dict[str, Any]) -> dict[str, UsageEntry]:
+    def _collect_usage_entries(
+        self, data: dict[str, Any], on_fetch: FetchProgress | None = None
+    ) -> dict[str, UsageEntry]:
         identities = self._usage_identities(data)
         if not identities:
             return {}
@@ -615,13 +618,13 @@ class ProviderAccountStore:
         if to_fetch:
             active_num = self._current_account_number(data, None)
             store.claim(to_fetch, identities)
-            store.record(
-                {
-                    account_num: self._fetch_usage_record(account_num, active_num)
-                    for account_num in to_fetch
-                },
-                identities,
-            )
+            records: dict[str, FetchRecord] = {}
+            for i, account_num in enumerate(to_fetch):
+                if on_fetch is not None:
+                    label = data["accounts"][account_num].get("label", account_num)
+                    on_fetch(i + 1, len(to_fetch), label)
+                records[account_num] = self._fetch_usage_record(account_num, active_num)
+            store.record(records, identities)
             entries = store.entries(identities)
         # Dead-token quarantine surfaces as a sentinel overlay (never persisted),
         # mirroring the Claude collector. Recovery is automatic: re-adding the
@@ -857,6 +860,24 @@ class ProviderAccountStore:
             f"{accent(action)} {self.definition.display_name} Account-{account_num}: "
             f"{resolved_label}"
         )
+
+    def list_data(self, on_fetch: FetchProgress | None = None) -> list[ProviderAccountRow]:
+        """Display-grade account rows for the CLI's human renderer."""
+        data = self._sequence_data()
+        entries = self._collect_usage_entries(data, on_fetch=on_fetch)
+        active_num = self._current_account_number(data, None)
+        rows = []
+        for account_num in sorted(data.get("accounts", {}).keys(), key=int):
+            account = data["accounts"][account_num]
+            rows.append(
+                ProviderAccountRow(
+                    number=account_num,
+                    label=account.get("label", ""),
+                    is_active=account_num == active_num,
+                    usage=entries.get(account_num, UsageEntry()),
+                )
+            )
+        return rows
 
     def list_accounts(self, json_output: bool) -> dict | None:
         data = self._sequence_data()

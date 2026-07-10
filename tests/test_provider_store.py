@@ -883,4 +883,22 @@ def test_materialize_active_auth_unreadable_target_raises(
     with pytest.raises(ConfigError, match="Failed to read"):
         store.materialize_active_auth()
 
+
+def test_provider_list_data_rows_and_on_fetch(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seeded_codex_store(
+        {"1": _codex_oauth_auth("acct-1", _FRESH), "2": _codex_oauth_auth("acct-2", _FRESH)},
+        active="1",
+    )
+    monkeypatch.setattr(
+        store.definition.backend, "fetch_usage", lambda auth_text, timeout_s: {"windows": []}
+    )
+    calls: list[tuple[int, int, str]] = []
+    rows = store.list_data(on_fetch=lambda d, t, label: calls.append((d, t, label)))
+
+    assert [(r.number, r.is_active) for r in rows] == [("1", True), ("2", False)]
+    assert all(r.label.startswith("acct-label-") for r in rows)
+    assert len(calls) == 2 and calls[0] == (1, 2, "acct-label-1")
+
     assert store.auth_path.is_symlink()
