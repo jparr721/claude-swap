@@ -64,6 +64,30 @@ def test_claude_table_stale_usage_is_age_annotated() -> None:
     assert "ago" in text  # display-grade affordance survives
 
 
+def test_scoped_model_at_limit_shows_marker() -> None:
+    usage = {
+        "five_hour": {"pct": 10.0},
+        "seven_day": {"pct": 20.0},
+        "scoped": [
+            {"name": "Fable", "pct": 100.0},
+            {"name": "Other", "pct": 50.0},
+        ],
+    }
+    row = ClaudeAccountRow(
+        number="1",
+        email="me@example.com",
+        tag="Pro",
+        is_active=False,
+        usage=UsageEntry(last_good=usage, fetched_at=1.0, age_s=5.0),
+        token_status=None,
+    )
+    text = _rendered(render.claude_accounts_table(ClaudeListData(False, [row])))
+    assert "Fable" in text
+    assert "Other" in text
+    assert "(!)" in text
+    assert text.count("(!)") == 1  # only the at-limit model gets the marker
+
+
 def test_claude_table_sentinel_and_last_seen() -> None:
     import time
 

@@ -308,7 +308,7 @@ cswap claude default switch 2 --json
 
 `cswap ls --json` returns a schema v2 provider envelope. Each provider entry contains its existing schema v1 payload. `cswap claude default status --json` and `cswap claude default switch --json` still return their schema v1 payloads directly. On a handled error stdout is `{"schemaVersion":1,"error":{"type":"ConfigError","message":"invalid config"}}` with a non-zero exit code. `switch` (bare, by target, or `--to`) reports `{"switched": true|false, "from": {"number": 1}, "to": {"number": 2}, "reason": "requested"}`.
 
-Usage is served from a per-account cache: when the usage API is briefly unreachable, the last-known numbers are shown instead of nothing (the human view marks them with their age, e.g. `· 2m ago`). Rows with usage carry additive `usageFetchedAt`/`usageAgeSeconds` fields telling you how old the measurement is.
+Usage is served from a per-account cache: when the usage API is briefly unreachable, the last-known numbers are shown instead of nothing (the human view marks them with their age as a standalone dim line under the usage bars, e.g. `2m ago`). Rows with usage carry additive `usageFetchedAt`/`usageAgeSeconds` fields telling you how old the measurement is.
 
 </details>
 
