@@ -55,14 +55,8 @@ from claude_swap.models import (
     get_timestamp,
 )
 from claude_swap.printer import (
-    abbreviate_path,
     accent,
-    bold_accent,
-    bolded,
     dimmed,
-    entrypoint_label,
-    format_age,
-    ide_short_name,
     muted,
     warning,
 )
@@ -96,109 +90,6 @@ SETUP_TOKEN_SCOPES = ("user:inference",)
 # accounts never burst the shared usage endpoint from one IP in the same
 # instant (request hygiene; see issue #85).
 _FETCH_STAGGER_S = 0.25
-
-# Show a "· Xm ago" age note on displayed usage older than this. Below it the
-# data is essentially current (auto refreshes every tick; --list on demand).
-_USAGE_AGE_NOTE_S = 90.0
-
-
-def _format_usage_lines(usage: dict) -> list[str]:
-    # Collect (label, body) rows first, then pad every label to the widest one so
-    # per-model names (e.g. "Fable") don't shift the columns of the other lines.
-    rows: list[tuple[str, str]] = []
-    spend = usage.get("spend")
-    if spend:
-        used = spend["used"]
-        limit = spend["limit"]
-        pct = spend["pct"]
-        cell = oauth.fresh_reset_strings(spend)
-        if cell:
-            rows.append(("$$", f"{pct:>3.0f}%   resets {cell[1]:<12}  ${used:,.2f} / ${limit:,.2f}"))
-        else:
-            rows.append(("$$", f"{pct:>3.0f}%   ${used:,.2f} / ${limit:,.2f}"))
-    for label, w in (("5h", usage.get("five_hour")), ("7d", usage.get("seven_day"))):
-        if w:
-            cell = oauth.fresh_reset_strings(w)
-            if cell:
-                countdown, clock = cell
-                rows.append((label, f"{w['pct']:>3.0f}%   resets {clock:<12}  in {countdown}"))
-            else:
-                rows.append((label, f"{w['pct']:>3.0f}%"))
-    for w in usage.get("scoped") or []:
-        # Per-model weekly limits (e.g. Fable). Flag ones at/over the limit so a
-        # maxed model — the usual reason to switch — stands out.
-        marker = "  (!)" if w["pct"] >= 100 else ""
-        cell = oauth.fresh_reset_strings(w)
-        if cell:
-            countdown, clock = cell
-            rows.append((w["name"], f"{w['pct']:>3.0f}%   resets {clock:<12}  in {countdown}{marker}"))
-        else:
-            rows.append((w["name"], f"{w['pct']:>3.0f}%{marker}"))
-    width = max((len(label) for label, _ in rows), default=0) + 1  # label + ':'
-    return [f"{label + ':':<{width}} {body}" for label, body in rows]
-
-
-# Human notes for sentinel usage states (fallback: the raw sentinel string).
-# Public: the TUI renders the same wording so both surfaces describe a state
-# identically (e.g. owned-and-expired means Claude Code will refresh, not that
-# the user must re-login).
-SENTINEL_NOTES = {
-    USAGE_TOKEN_EXPIRED: "token expired — Claude Code refreshes the active account",
-    USAGE_API_KEY: "API key (no quota)",
-    USAGE_KEYCHAIN_UNAVAILABLE: "keychain unavailable — locked or in use; try again",
-    USAGE_RELOGIN_REQUIRED: "re-login needed - refresh token dead; log in with Claude Code, then run: cswap claude default add",
-}
-
-
-def last_seen_note(entry: UsageEntry) -> str | None:
-    """"last seen 53% used · 12m ago" from an entry's last-good measurement.
-
-    Public: the TUI renders the same note under sentinel states (see
-    ``SENTINEL_NOTES``), so both surfaces stay word-for-word identical.
-    """
-    if entry.last_good is None or entry.fetched_at is None:
-        return None
-    headroom = oauth.account_headroom(entry.last_good)
-    if headroom is None:
-        return None
-    return (
-        f"last seen {100 - headroom:.0f}% used · "
-        f"{format_age(int(entry.fetched_at * 1000))}"
-    )
-
-
-def _usage_entry_lines(entry: UsageEntry) -> list[str]:
-    """Styled usage lines (sans indent) for one account's entry.
-
-    Sentinel states render their note first, with a supplementary "last seen"
-    line when an older measurement exists. Measurements render as usual, age-
-    annotated once older than ``_USAGE_AGE_NOTE_S`` (stale-served); an account
-    with no measurement at all shows "usage unavailable" plus the last fetch
-    error, so a failing endpoint is visible instead of a silent blank.
-    """
-    if entry.sentinel is not None:
-        out = [dimmed(SENTINEL_NOTES.get(entry.sentinel, entry.sentinel))]
-        last_seen = last_seen_note(entry)
-        if last_seen is not None and entry.sentinel != USAGE_API_KEY:
-            out.append(f"{dimmed('└')} {muted(last_seen)}")
-        return out
-    if entry.last_good is not None:
-        lines = _format_usage_lines(entry.last_good)
-        if (
-            lines
-            and entry.age_s is not None
-            and entry.age_s > _USAGE_AGE_NOTE_S
-            and entry.fetched_at is not None
-        ):
-            lines[-1] += f" · {format_age(int(entry.fetched_at * 1000))}"
-        return [
-            f"{dimmed('└' if j == len(lines) - 1 else '├')} {muted(line)}"
-            for j, line in enumerate(lines)
-        ]
-    detail = "usage unavailable"
-    if entry.last_error:
-        detail += f" ({entry.last_error})"
-    return [dimmed(detail)]
 
 
 def _sweep_legacy_keyring(usernames: list[str], removed_items: list[str]) -> None:
@@ -1910,85 +1801,22 @@ class ClaudeAccountSwitcher:
             )
         return ClaudeListData(first_run_needed=False, rows=rows)
 
-    def list_accounts(
-        self,
-        show_token_status: bool = False,
-        json_output: bool = False,
-    ) -> dict | None:
-        """List all managed accounts.
+    def list_accounts(self) -> dict:
+        """Return the schema-v1 account payload (printing nothing).
 
-        In ``json_output`` mode, returns the schema-v1 payload (printing nothing)
-        for the CLI to serialize; otherwise prints the human view and returns None.
+        The CLI serializes JSON and renders the human view via ``render``; the
+        first-run prompt lives in the CLI too. Collecting usage here still drives
+        the proactive inactive-account refresh as a side effect.
         """
         if not self.sequence_file.exists():
-            # JSON mode must never prompt — emit an empty list instead of the
-            # interactive first-run setup.
-            if json_output:
-                return {
-                    "schemaVersion": SCHEMA_VERSION,
-                    "activeAccountNumber": None,
-                    "accounts": [],
-                }
-            print(dimmed("No accounts are managed yet."))
-            self.first_run_setup()
-            return None
-
+            return {
+                "schemaVersion": SCHEMA_VERSION,
+                "activeAccountNumber": None,
+                "accounts": [],
+            }
         accounts_info = self._build_accounts_info()
         entries = self._collect_usage_entries(accounts_info, fetch=None)
-
-        if json_output:
-            return self._build_list_payload(accounts_info, entries)
-
-        print(bolded("Accounts:"))
-        for i, (num, email, org_name, org_uuid, is_active, _) in enumerate(accounts_info):
-            tag = self._get_display_tag(email, org_name, org_uuid)
-            if is_active:
-                marker = f" {bold_accent('(active)')}"
-                print(f"  {num}: {email} {muted(f'[{tag}]')}{marker}")
-            else:
-                print(f"  {num}: {email} {muted(f'[{tag}]')}")
-            for line in _usage_entry_lines(entries[str(num)]):
-                print(f"     {line}")
-
-            if show_token_status:
-                token_status = oauth.build_token_status(accounts_info[i][5])
-                if token_status:
-                    print(f"     {dimmed('•')} {muted(token_status)}")
-            if i < len(accounts_info) - 1:
-                print()
-
-        # Running instances
-        try:
-            sessions, ide_instances = get_running_instances()
-
-            if sessions or ide_instances:
-                # Group by (label, folder) to avoid repetitive lines
-                groups: dict[tuple[str, str], dict[str, int]] = {}
-                for session in sessions:
-                    label = entrypoint_label(session.entrypoint)
-                    cwd = abbreviate_path(session.cwd)
-                    key = (label, cwd)
-                    counts = groups.setdefault(key, {"sessions": 0, "ide": 0})
-                    counts["sessions"] += 1
-                for ide in ide_instances:
-                    name = ide_short_name(ide.ide_name)
-                    for folder in ide.workspace_folders:
-                        key = (name, abbreviate_path(folder))
-                        counts = groups.setdefault(key, {"sessions": 0, "ide": 0})
-                        counts["ide"] += 1
-
-                print()
-                print(bolded("Running instances:"))
-                for (label, cwd), counts in groups.items():
-                    parts = []
-                    s = counts["sessions"]
-                    if s:
-                        parts.append(f"{s} session{'s' if s > 1 else ''}")
-                    if counts["ide"]:
-                        parts.append("IDE")
-                    print(f"  {dimmed('●')} {muted(label)}   {muted(cwd)}  {dimmed(f'({", ".join(parts)})')}")
-        except Exception:
-            self._logger.debug("Failed to detect running instances", exc_info=True)
+        return self._build_list_payload(accounts_info, entries)
 
     def _active_account_usage(
         self, account_num: str, current_email: str, org_uuid: str
@@ -2077,43 +1905,9 @@ class ClaudeAccountSwitcher:
             usage=self._active_account_usage(account_num, current_email, current_org_uuid),
         )
 
-    def status(self, json_output: bool = False) -> dict | None:
-        """Display current account status (or return the schema-v1 payload)."""
-        if json_output:
-            return self._build_status_payload()
-
-        identity = self._get_current_account()
-        if identity is None:
-            print(f"{bolded('Status:')} {dimmed('No active Claude account')}")
-            return None
-        current_email, current_org_uuid = identity
-
-        data = self._get_sequence_data_migrated()
-        if not data:
-            print(f"{bolded('Status:')} {current_email} {dimmed('(not managed)')}")
-            return None
-
-        account_num = self._find_account_slot(data, current_email, current_org_uuid)
-        org_name = ""
-        if account_num is not None:
-            org_name = data["accounts"][account_num].get("organizationName", "") or ""
-
-        if account_num:
-            tag = self._get_display_tag(current_email, org_name, current_org_uuid)
-            total = len(data.get("accounts", {}))
-            print(
-                f"{bolded('Status:')} {accent(f'Account-{account_num}')} "
-                f"({current_email} {muted(f'[{tag}]')})"
-            )
-            print(f"  {dimmed(f'Total managed accounts: {total}')}")
-            entry = self._active_account_usage(
-                account_num, current_email, current_org_uuid
-            )
-            for line in _usage_entry_lines(entry):
-                print(f"  {line}")
-        else:
-            print(f"{bolded('Status:')} {current_email} {dimmed('(not managed)')}")
-        return None
+    def status(self) -> dict:
+        """Return the schema-v1 status payload (the CLI renders the human view)."""
+        return self._build_status_payload()
 
     def first_run_setup(self) -> None:
         """First-run setup workflow."""

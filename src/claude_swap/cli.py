@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from collections.abc import Callable
@@ -11,17 +12,21 @@ from types import SimpleNamespace
 
 import typer
 
-from claude_swap import __version__
+from claude_swap import __version__, render
 from claude_swap.exceptions import ClaudeSwitchError, ConfigError
 from claude_swap.json_output import error_envelope, provider_envelope
 from claude_swap.printer import dimmed, error, force_utf8_output, muted
+from claude_swap.process_detection import get_running_instances
 from claude_swap.providers.registry import (
     get_provider,
     managed_aggregate_providers,
     provider_definitions,
 )
 from claude_swap.providers.store import ProviderAccountStore
+from claude_swap.providers.types import ProviderAccountRow
 from claude_swap.switcher import ClaudeAccountSwitcher
+
+_logger = logging.getLogger("claude-swap")
 
 app = typer.Typer(
     help="Multi-Account Switcher for Claude Code",
@@ -97,6 +102,37 @@ def _dispatch(
         _update_check_note()
 
 
+def _render_claude_accounts(switcher: ClaudeAccountSwitcher, token_status: bool) -> None:
+    with render.fetch_progress("Claude") as tick:
+        data = switcher.list_data(show_token_status=token_status, on_fetch=tick)
+    if data.first_run_needed:
+        render.console.print("No accounts are managed yet.", style="dim")
+        switcher.first_run_setup()
+        return
+    render.console.print(render.claude_accounts_table(data))
+    # Running instances are presentation-adjacent system state; failures to
+    # detect them must never break the listing.
+    try:
+        sessions, ide_instances = get_running_instances()
+    except Exception:
+        _logger.debug("Failed to detect running instances", exc_info=True)
+        return
+    block = render.running_instances(sessions, ide_instances)
+    if block is not None:
+        render.console.print(block)
+
+
+def _provider_relogin_hint(provider_store: ProviderAccountStore) -> str:
+    ref = provider_store.definition.ref
+    return f"re-login needed - re-add with: cswap {ref.frontend} {ref.backend} add"
+
+
+def _fetch_provider_rows(provider_store: ProviderAccountStore) -> list[ProviderAccountRow]:
+    """One usage collection per provider per invocation, under its spinner."""
+    with render.fetch_progress(provider_store.definition.display_name) as tick:
+        return provider_store.list_data(on_fetch=tick)
+
+
 def _aggregate_list(
     switcher: ClaudeAccountSwitcher, json_mode: bool, token_status: bool
 ) -> dict | None:
@@ -104,37 +140,24 @@ def _aggregate_list(
 
     Provider sections are auxiliary: their state living in separate trees must
     never fail the primary Claude listing. In JSON mode returns the schema-v2
-    provider envelope with per-provider errors embedded.
+    provider envelope with per-provider errors embedded; providers with no
+    accounts are skipped silently in the human view, matching the old aggregate.
     """
-    payload = switcher.list_accounts(
-        show_token_status=token_status,
-        json_output=json_mode,
-    )
-    provider_payloads: dict[str, dict[str, dict]] | None = None
-    if json_mode:
-        provider_payloads = {"claude": {"default": payload or {}}}
-    for provider_store in managed_aggregate_providers():
-        provider_ref = provider_store.definition.ref
-        try:
-            provider_payload = provider_store.list_accounts(json_output=True)
-            if json_mode:
-                provider_payloads.setdefault(provider_ref.frontend, {})[
-                    provider_ref.backend
-                ] = provider_payload or {}
-            elif provider_payload is not None and provider_payload["accounts"]:
-                print()
-                provider_store.list_accounts(json_output=False)
-        except ClaudeSwitchError as provider_err:
-            if json_mode:
-                provider_payloads.setdefault(provider_ref.frontend, {})[
-                    provider_ref.backend
-                ] = {
-                    "error": {
-                        "type": provider_err.__class__.__name__,
-                        "message": str(provider_err),
-                    }
-                }
-            else:
+    if not json_mode:
+        _render_claude_accounts(switcher, token_status)
+        for provider_store in managed_aggregate_providers():
+            try:
+                rows = _fetch_provider_rows(provider_store)
+                if rows:
+                    print()
+                    render.console.print(
+                        render.provider_accounts_table(
+                            provider_store.definition.display_name,
+                            rows,
+                            _provider_relogin_hint(provider_store),
+                        )
+                    )
+            except ClaudeSwitchError as provider_err:
                 print(
                     dimmed(
                         f"{provider_store.definition.frontend.display_name} "
@@ -142,9 +165,27 @@ def _aggregate_list(
                     ),
                     file=sys.stderr,
                 )
-    if json_mode and provider_payloads is not None:
-        return provider_envelope(provider_payloads)
-    return payload
+        return None
+
+    payload = switcher.list_accounts()
+    provider_payloads: dict[str, dict[str, dict]] = {"claude": {"default": payload or {}}}
+    for provider_store in managed_aggregate_providers():
+        provider_ref = provider_store.definition.ref
+        try:
+            provider_payload = provider_store.list_accounts()
+            provider_payloads.setdefault(provider_ref.frontend, {})[
+                provider_ref.backend
+            ] = provider_payload or {}
+        except ClaudeSwitchError as provider_err:
+            provider_payloads.setdefault(provider_ref.frontend, {})[
+                provider_ref.backend
+            ] = {
+                "error": {
+                    "type": provider_err.__class__.__name__,
+                    "message": str(provider_err),
+                }
+            }
+    return provider_envelope(provider_payloads)
 
 
 @app.command("ls")
@@ -398,13 +439,15 @@ def claude_list(
         # Token status is not part of the JSON v1 schema; reject rather than
         # silently ignore it (a future additive field can add it).
         raise typer.BadParameter("--token-status cannot be combined with --json")
-    _dispatch(
-        lambda: _init_switcher(debug).list_accounts(
-            show_token_status=token_status, json_output=json_output
-        ),
-        json_mode=json_output,
-        update_check=True,
-    )
+
+    def action() -> dict | None:
+        switcher = _init_switcher(debug)
+        if json_output:
+            return switcher.list_accounts()
+        _render_claude_accounts(switcher, token_status)
+        return None
+
+    _dispatch(action, json_mode=json_output, update_check=True)
 
 
 @claude_default_app.command("status")
@@ -415,11 +458,15 @@ def claude_status(
     debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
 ) -> None:
     """Show the current Claude account."""
-    _dispatch(
-        lambda: _init_switcher(debug).status(json_output=json_output),
-        json_mode=json_output,
-        update_check=True,
-    )
+
+    def action() -> dict | None:
+        switcher = _init_switcher(debug)
+        if json_output:
+            return switcher.status()
+        render.claude_status(switcher.status_data())
+        return None
+
+    _dispatch(action, json_mode=json_output, update_check=True)
 
 
 @claude_default_app.command("add")
@@ -721,11 +768,28 @@ def _build_backend_app(frontend: str, backend: str, display_name: str) -> typer.
         ),
     ) -> None:
         """List managed accounts."""
-        _dispatch(
-            lambda: _store().list_accounts(json_output=json_output),
-            json_mode=json_output,
-            update_check=False,
-        )
+
+        def action() -> dict | None:
+            store = _store()
+            if json_output:
+                return store.list_accounts()
+            rows = _fetch_provider_rows(store)
+            if rows:
+                render.console.print(
+                    render.provider_accounts_table(
+                        store.definition.display_name,
+                        rows,
+                        _provider_relogin_hint(store),
+                    )
+                )
+            else:
+                render.console.print(
+                    f"No {store.definition.display_name} accounts are managed yet.",
+                    style="dim",
+                )
+            return None
+
+        _dispatch(action, json_mode=json_output, update_check=False)
 
     @backend_app.command("status")
     def provider_status(
@@ -734,11 +798,15 @@ def _build_backend_app(frontend: str, backend: str, display_name: str) -> typer.
         ),
     ) -> None:
         """Show the active account."""
-        _dispatch(
-            lambda: _store().status(json_output=json_output),
-            json_mode=json_output,
-            update_check=False,
-        )
+
+        def action() -> dict | None:
+            store = _store()
+            if json_output:
+                return store.status()
+            render.provider_status(store.definition.display_name, store.status())
+            return None
+
+        _dispatch(action, json_mode=json_output, update_check=False)
 
     @backend_app.command("add")
     def provider_add(

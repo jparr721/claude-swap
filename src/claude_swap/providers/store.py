@@ -18,7 +18,7 @@ from claude_swap.exceptions import AccountNotFoundError, ConfigError, LockError,
 from claude_swap.locking import FileLock
 from claude_swap.models import FetchProgress, get_timestamp
 from claude_swap.json_output import SCHEMA_VERSION, USAGE_RELOGIN_REQUIRED, usage_freshness_fields
-from claude_swap.printer import accent, bolded, dimmed, format_age, muted
+from claude_swap.printer import accent
 from claude_swap.providers.openai import OPENAI_USAGE_TIMEOUT_S
 from claude_swap.providers.types import (
     AuthMetadata,
@@ -29,8 +29,6 @@ from claude_swap.providers.types import (
 from claude_swap.usage_store import FetchRecord, UsageEntry, UsageStore, with_sentinel
 
 _logger = logging.getLogger("claude-swap")
-
-_USAGE_AGE_NOTE_S = 90.0
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -89,33 +87,6 @@ def _window_label(window: dict[str, Any]) -> str:
     if hours >= 24:
         return f"{round(hours / 24)}d"
     return f"{hours}h"
-
-
-def _usage_to_lines(usage: dict[str, Any]) -> list[str]:
-    rows: list[tuple[str, str]] = []
-    windows = usage.get("windows")
-    if isinstance(windows, list):
-        for window in windows:
-            if not isinstance(window, dict):
-                continue
-            label = _safe_str(window.get("label"))
-            pct = window.get("pct")
-            if not label or not isinstance(pct, (int, float)):
-                continue
-            body = f"{pct:>3.0f}%"
-            cell = oauth.fresh_reset_strings(window)
-            if cell is not None:
-                countdown, clock = cell
-                body = f"{body}   resets {clock:<12}  in {countdown}"
-            rows.append((label, body))
-    plan = _safe_str(usage.get("plan"))
-    if plan:
-        rows.append(("Plan", plan))
-    credits = usage.get("credits")
-    if isinstance(credits, (int, float)):
-        rows.append(("Credits", f"{credits:g}"))
-    width = max((len(label) for label, _ in rows), default=0) + 1
-    return [f"{label + ':':<{width}} {body}" for label, body in rows]
 
 
 def _window_to_json(window: dict[str, Any]) -> dict[str, Any]:
@@ -671,31 +642,6 @@ class ProviderAccountStore:
             "accounts": accounts,
         }
 
-    def _usage_lines(self, entry: UsageEntry) -> list[str]:
-        if entry.sentinel == USAGE_RELOGIN_REQUIRED:
-            ref = self.definition.ref
-            return [
-                dimmed(
-                    "re-login needed - refresh token dead; re-add with: "
-                    f"cswap {ref.frontend} {ref.backend} add"
-                )
-            ]
-        if entry.last_good is not None:
-            lines = _usage_to_lines(entry.last_good)
-            if (
-                lines
-                and entry.age_s is not None
-                and entry.age_s > _USAGE_AGE_NOTE_S
-                and entry.fetched_at is not None
-            ):
-                lines[-1] += f" - {format_age(int(entry.fetched_at * 1000))}"
-            if lines:
-                return [muted(line) for line in lines]
-        detail = "usage unavailable"
-        if entry.last_error:
-            detail += f" ({entry.last_error})"
-        return [dimmed(detail)]
-
     def _run_headless_login(self) -> None:
         """Drive the frontend's headless login (writes through the active symlink)."""
         argv = self.definition.frontend.headless_login_argv()
@@ -879,78 +825,40 @@ class ProviderAccountStore:
             )
         return rows
 
-    def list_accounts(self, json_output: bool) -> dict | None:
+    def list_accounts(self) -> dict:
+        """Return the schema-v1 account payload (the CLI renders the human view)."""
         data = self._sequence_data()
-        entries = self._collect_usage_entries(data)
-        if json_output:
-            return self._build_list_payload(data, entries)
+        entries = self._collect_usage_entries(data, on_fetch=None)
+        return self._build_list_payload(data, entries)
 
-        accounts = data.get("accounts", {})
-        if not accounts:
-            print(dimmed(f"No {self.definition.display_name} accounts are managed yet."))
-            return None
-
-        payload = self._build_list_payload(data, entries)
-        print(bolded(f"{self.definition.display_name} accounts:"))
-        for account in payload["accounts"]:
-            marker = ""
-            if account["active"]:
-                marker = f" {accent('(active)')}"
-            print(f"  {account['number']}: {account['label']}{marker}")
-            entry = entries.get(str(account["number"]), UsageEntry())
-            for line in self._usage_lines(entry):
-                print(f"     {line}")
-        return None
-
-    def status(self, json_output: bool) -> dict | None:
+    def status(self) -> dict:
+        """Return the schema-v1 status payload (the CLI renders the human view)."""
         data = self._sequence_data()
         active_auth = self._read_active_auth()
         if active_auth is None:
-            payload: dict[str, Any] = {
+            return {
                 "schemaVersion": SCHEMA_VERSION,
                 "provider": self._provider_payload(),
                 "active": None,
             }
-        else:
-            current_num = self._current_account_number(data, active_auth)
-            if current_num is None:
-                payload = {
-                    "schemaVersion": SCHEMA_VERSION,
-                    "provider": self._provider_payload(),
-                    "active": {"managed": False},
-                }
-            else:
-                account = data["accounts"][current_num]
-                payload = {
-                    "schemaVersion": SCHEMA_VERSION,
-                    "provider": self._provider_payload(),
-                    "active": {
-                        "number": int(current_num),
-                        "label": account.get("label", ""),
-                        "managed": True,
-                    },
-                    "totalManagedAccounts": len(data.get("accounts", {})),
-                }
-        if json_output:
-            return payload
-
-        active = payload["active"]
-        if active is None:
-            print(
-                f"{bolded(f'{self.definition.display_name} status:')} "
-                f"{dimmed(f'No active {self.definition.display_name} auth')}"
-            )
-        elif active.get("managed"):
-            active_label = accent(f"Account-{active['number']}")
-            print(
-                f"{bolded(f'{self.definition.display_name} status:')} "
-                f"{active_label} ({active['label']})"
-            )
-        else:
-            print(
-                f"{bolded(f'{self.definition.display_name} status:')} {muted('(not managed)')}"
-            )
-        return None
+        current_num = self._current_account_number(data, active_auth)
+        if current_num is None:
+            return {
+                "schemaVersion": SCHEMA_VERSION,
+                "provider": self._provider_payload(),
+                "active": {"managed": False},
+            }
+        account = data["accounts"][current_num]
+        return {
+            "schemaVersion": SCHEMA_VERSION,
+            "provider": self._provider_payload(),
+            "active": {
+                "number": int(current_num),
+                "label": account.get("label", ""),
+                "managed": True,
+            },
+            "totalManagedAccounts": len(data.get("accounts", {})),
+        }
 
     def _rotation_target(self, data: dict[str, Any]) -> str | None:
         sequence = data.get("sequence", [])

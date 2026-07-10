@@ -145,7 +145,7 @@ class TestListJson:
         switcher = ClaudeAccountSwitcher()
         with patch.object(switcher, "first_run_setup") as first_run, \
              patch("builtins.input") as fake_input:
-            payload = switcher.list_accounts(json_output=True)
+            payload = switcher.list_accounts()
         first_run.assert_not_called()
         fake_input.assert_not_called()
         assert payload == {
@@ -174,7 +174,7 @@ class TestListJson:
                           return_value=ActiveCredentials(active_creds, False)), \
              patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
              patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(usage)):
-            payload = switcher.list_accounts(json_output=True)
+            payload = switcher.list_accounts()
 
         # Method itself prints nothing — the CLI serializes.
         assert capsys.readouterr().out == ""
@@ -202,7 +202,7 @@ class TestListJson:
                           return_value=ActiveCredentials(active_creds, False)), \
              patch.object(switcher, "_read_account_credentials", return_value=""), \
              patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(None)):
-            payload = switcher.list_accounts(json_output=True)
+            payload = switcher.list_accounts()
 
         by_num = {a["number"]: a for a in payload["accounts"]}
         assert by_num[1]["usageStatus"] == "unavailable"
@@ -250,7 +250,7 @@ class TestListJson:
              patch.object(switcher, "_read_account_credentials", return_value=""), \
              patch("claude_swap.oauth.try_fetch_usage_for_account",
                    return_value=oauth.UsageOutcome(None, error="timeout")):
-            payload = switcher.list_accounts(json_output=True)
+            payload = switcher.list_accounts()
 
         row = next(a for a in payload["accounts"] if a["number"] == 1)
         assert row["usageStatus"] == expected_status
@@ -268,14 +268,14 @@ class TestListJson:
 class TestStatusJson:
     def test_status_no_active(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        assert switcher.status(json_output=True) == {
+        assert switcher.status() == {
             "schemaVersion": SCHEMA_VERSION,
             "active": None,
         }
 
     def test_status_unmanaged(self, temp_home: Path, mock_claude_config: Path):
         switcher = ClaudeAccountSwitcher()
-        payload = switcher.status(json_output=True)
+        payload = switcher.status()
         assert payload["active"] == {"email": "test@example.com", "managed": False}
 
     def test_status_managed(
@@ -294,7 +294,7 @@ class TestStatusJson:
         with patch.object(switcher, "_read_active_credentials",
                           return_value=ActiveCredentials(active_creds, False)), \
              patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(usage)):
-            payload = switcher.status(json_output=True)
+            payload = switcher.status()
 
         assert capsys.readouterr().out == ""
         active = payload["active"]

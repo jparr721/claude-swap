@@ -14,7 +14,11 @@ import pytest
 
 from claude_swap import macos_keychain
 from claude_swap import oauth
-from claude_swap.json_output import USAGE_TOKEN_EXPIRED
+from claude_swap.json_output import (
+    USAGE_KEYCHAIN_UNAVAILABLE,
+    USAGE_NO_CREDENTIALS,
+    USAGE_TOKEN_EXPIRED,
+)
 from claude_swap.exceptions import (
     ConfigError,
     CredentialReadError,
@@ -31,7 +35,6 @@ from claude_swap.switcher import (
     ClaudeAccountSwitcher,
     SECURITY_SERVICE,
     SETUP_TOKEN_SCOPES,
-    _format_usage_lines,
 )
 
 
@@ -432,7 +435,7 @@ class TestStatusCache:
     """status() shares the usage.json cache with list_accounts."""
 
     def test_status_uses_cached_usage(
-        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, capsys
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
     ):
         """A fresh store entry for the active account skips the API call."""
         sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
@@ -453,15 +456,14 @@ class TestStatusCache:
         with patch.object(switcher, "_read_active_credentials",
                           return_value=ActiveCredentials(active_creds, False)), \
              patch("claude_swap.oauth.try_fetch_usage_for_account") as mock_fetch:
-            switcher.status()
+            data = switcher.status_data()
 
         mock_fetch.assert_not_called()
-        output = capsys.readouterr().out
-        assert "25%" in output
-        assert "60%" in output
+        assert data.usage.last_good["five_hour"]["pct"] == 25
+        assert data.usage.last_good["seven_day"]["pct"] == 60
 
     def test_status_fetches_with_is_active_true_when_cc_running(
-        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, capsys
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
     ):
         """When Claude Code is running, fetch with is_active=True (never refresh live creds)."""
         sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
@@ -481,13 +483,11 @@ class TestStatusCache:
              patch.object(switcher, "_active_cc_running", return_value=True), \
              patch("claude_swap.oauth.try_fetch_usage_for_account",
                    return_value=oauth.UsageOutcome(usage_result)) as mock_fetch:
-            switcher.status()
+            data = switcher.status_data()
 
         mock_fetch.assert_called_once()
         assert mock_fetch.call_args.kwargs.get("is_active") is True
-
-        output = capsys.readouterr().out
-        assert "10%" in output
+        assert data.usage.last_good["five_hour"]["pct"] == 10
 
         entry = UsageStore(switcher.backup_dir / "cache").entries(
             {"1": ("test@example.com", "")}
@@ -651,15 +651,16 @@ class TestListAccountsUsage:
         with patch.object(switcher, "_read_credentials", return_value=active_creds), \
              patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
              patch("claude_swap.oauth.urllib.request.urlopen", return_value=mock_response):
-            switcher.list_accounts()
+            data = switcher.list_data()
 
-        output = capsys.readouterr().out
-        assert "test@example.com [personal] (active)" in output
-        assert "account2@example.com" in output
-        assert "├ 5h:" in output
-        assert "└ 7d:" in output
-        assert "10%" in output
-        assert "50%" in output
+        by_num = {r.number: r for r in data.rows}
+        assert by_num["1"].email == "test@example.com"
+        assert by_num["1"].tag == "personal"
+        assert by_num["1"].is_active is True
+        # The inactive account fetches through the mocked usage endpoint.
+        assert by_num["2"].email == "account2@example.com"
+        assert by_num["2"].usage.last_good["five_hour"]["pct"] == 10.0
+        assert by_num["2"].usage.last_good["seven_day"]["pct"] == 50.0
 
     def test_list_shows_usage_null_reset(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, capsys
@@ -685,12 +686,13 @@ class TestListAccountsUsage:
         with patch.object(switcher, "_read_credentials", return_value=active_creds), \
              patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
              patch("claude_swap.oauth.urllib.request.urlopen", return_value=mock_response):
-            switcher.list_accounts()
+            data = switcher.list_data()
 
-        output = capsys.readouterr().out
-        assert "5h:   0%" in output
-        assert "7d: 100%" in output
-        assert "usage unavailable" not in output
+        # The inactive account fetches through the mocked usage endpoint.
+        inactive = next(r for r in data.rows if not r.is_active)
+        assert inactive.usage.last_good["five_hour"]["pct"] == 0.0
+        assert inactive.usage.last_good["seven_day"]["pct"] == 100.0
+        assert inactive.usage.sentinel is None
 
     def test_list_no_credentials(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, capsys
@@ -703,10 +705,9 @@ class TestListAccountsUsage:
 
         with patch.object(switcher, "_read_credentials", return_value=""), \
              patch.object(switcher, "_read_account_credentials", return_value=""):
-            switcher.list_accounts()
+            data = switcher.list_data()
 
-        output = capsys.readouterr().out
-        assert "no credentials" in output
+        assert any(r.usage.sentinel == USAGE_NO_CREDENTIALS for r in data.rows)
 
     def test_list_never_writes_live_while_claude_code_running(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
@@ -765,10 +766,9 @@ class TestListAccountsUsage:
              patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
              patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(None)), \
              patch("claude_swap.oauth.build_token_status", return_value="oauth: fresh, refresh token yes"):
-            switcher.list_accounts(show_token_status=True)
+            data = switcher.list_data(show_token_status=True)
 
-        output = capsys.readouterr().out
-        assert "oauth: fresh, refresh token yes" in output
+        assert any(r.token_status == "oauth: fresh, refresh token yes" for r in data.rows)
 
     def test_list_uses_cached_usage(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, capsys
@@ -801,13 +801,13 @@ class TestListAccountsUsage:
                           return_value=ActiveCredentials(active_creds, False)), \
              patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
              patch("claude_swap.oauth.try_fetch_usage_for_account") as mock_fetch:
-            switcher.list_accounts()
+            data = switcher.list_data()
 
         # API should NOT have been called — data came from the store
         mock_fetch.assert_not_called()
-        output = capsys.readouterr().out
-        assert "25%" in output
-        assert "80%" in output
+        by_num = {r.number: r for r in data.rows}
+        assert by_num["1"].usage.last_good["five_hour"]["pct"] == 25
+        assert by_num["2"].usage.last_good["five_hour"]["pct"] == 80
 
     def test_list_refetches_stale_entries(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, capsys
@@ -844,13 +844,12 @@ class TestListAccountsUsage:
              patch.object(switcher, "_active_cc_running", return_value=True), \
              patch("claude_swap.oauth.try_fetch_usage_for_account",
                    return_value=oauth.UsageOutcome(usage_result)) as mock_fetch:
-            switcher.list_accounts()
+            data = switcher.list_data()
 
         assert mock_fetch.call_count == 2
-        output = capsys.readouterr().out
-        # Should show live data (10%), not the stale 25%
-        assert "10%" in output
-        assert "25%" not in output
+        by_num = {r.number: r for r in data.rows}
+        # Should carry live data (10%), not the stale 25%
+        assert by_num["1"].usage.last_good["five_hour"]["pct"] == 10
 
 class TestActiveAccountRefresh:
     """`_fetch_active_usage`: refresh the active token only when no owner is running."""
@@ -1062,9 +1061,9 @@ class TestActiveAccountRefresh:
         mock_fetch.assert_not_called()
 
     def test_list_renders_token_expired_line(
-        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, capsys
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
     ):
-        """End-to-end: --list shows the intentional message for the active account."""
+        """The active account carries the token-expired sentinel for the CLI to render."""
         switcher = self._switcher(sample_sequence_data)
         backup_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-backup"}})
 
@@ -1075,10 +1074,10 @@ class TestActiveAccountRefresh:
              patch.object(switcher, "_live_session_pids", return_value=[]), \
              patch("claude_swap.oauth.try_fetch_usage_for_account",
                    return_value=oauth.UsageOutcome(None)):
-            switcher.list_accounts()
+            data = switcher.list_data()
 
-        output = capsys.readouterr().out
-        assert "token expired — Claude Code refreshes the active account" in output
+        active = next(r for r in data.rows if r.is_active)
+        assert active.usage.sentinel == USAGE_TOKEN_EXPIRED
 
     def test_expired_owned_sentinel_wins_over_stored_entry(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
@@ -2164,12 +2163,12 @@ class TestListAccountsOrgDisplay:
 
         switcher = ClaudeAccountSwitcher()
         with patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(None)):
-            switcher.list_accounts()
+            data = switcher.list_data()
 
-        out = capsys.readouterr().out
-        assert "Acme Corp" in out
-        assert "personal" in out
-        assert "(active)" in out
+        tags = {r.tag for r in data.rows}
+        assert "Acme Corp" in tags
+        assert "personal" in tags
+        assert any(r.is_active for r in data.rows)
 
     def test_active_account_detected_by_org_uuid(self, temp_home, mock_credentials_file,
                                                    sample_sequence_data_with_org, capsys):
@@ -2191,12 +2190,11 @@ class TestListAccountsOrgDisplay:
 
         switcher = ClaudeAccountSwitcher()
         with patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(None)):
-            switcher.list_accounts()
+            data = switcher.list_data()
 
-        out = capsys.readouterr().out
-        lines = [ln for ln in out.splitlines() if "(active)" in ln]
-        assert len(lines) == 1
-        assert "personal" in lines[0]
+        active = [r for r in data.rows if r.is_active]
+        assert len(active) == 1
+        assert active[0].tag == "personal"
 
 
 # ── Task 8: backward compatibility ───────────────────────────────────────────
@@ -2222,14 +2220,13 @@ class TestBackwardCompatibility:
 
         switcher = ClaudeAccountSwitcher()
         with patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(None)):
-            switcher.list_accounts()
+            data = switcher.list_data()
 
-        out = capsys.readouterr().out
-        assert "account1@example.com" in out
-        assert "personal" in out
+        row = next(r for r in data.rows if r.email == "account1@example.com")
+        assert row.tag == "personal"
 
-    def test_status_with_old_sequence_json(self, temp_home, sample_sequence_data, capsys):
-        """status should display personal for old sequence.json entries."""
+    def test_status_with_old_sequence_json(self, temp_home, sample_sequence_data):
+        """status should report personal for old sequence.json entries."""
         from claude_swap.switcher import ClaudeAccountSwitcher
 
         backup_dir = get_backup_root()
@@ -2245,11 +2242,10 @@ class TestBackwardCompatibility:
         }))
 
         switcher = ClaudeAccountSwitcher()
-        switcher.status()
+        data = switcher.status_data()
 
-        out = capsys.readouterr().out
-        assert "account1@example.com" in out
-        assert "personal" in out
+        assert data.email == "account1@example.com"
+        assert data.tag == "personal"
 
 
 class TestUpgradeMigration:
@@ -2265,9 +2261,9 @@ class TestUpgradeMigration:
         config_path.write_text(json.dumps(live_config))
 
     def test_status_after_upgrade_with_org_uuid(
-        self, temp_home, sample_sequence_data_pre_v06, capsys
+        self, temp_home, sample_sequence_data_pre_v06
     ):
-        """status() should detect managed account after auto-migration."""
+        """status_data() should detect managed account after auto-migration."""
         self._setup_pre_v06(temp_home, sample_sequence_data_pre_v06, {
             "oauthAccount": {
                 "emailAddress": "user@example.com",
@@ -2278,16 +2274,14 @@ class TestUpgradeMigration:
         })
 
         switcher = ClaudeAccountSwitcher()
-        switcher.status()
+        data = switcher.status_data()
 
-        out = capsys.readouterr().out
-        assert "Account-1" in out
-        assert "not managed" not in out
+        assert data.account_number == "1"
 
     def test_list_after_upgrade_marks_active(
-        self, temp_home, sample_sequence_data_pre_v06, capsys
+        self, temp_home, sample_sequence_data_pre_v06
     ):
-        """list_accounts() should mark the active account after auto-migration."""
+        """list_data() should mark the active account after auto-migration."""
         self._setup_pre_v06(temp_home, sample_sequence_data_pre_v06, {
             "oauthAccount": {
                 "emailAddress": "user@example.com",
@@ -2302,10 +2296,9 @@ class TestUpgradeMigration:
 
         switcher = ClaudeAccountSwitcher()
         with patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(None)):
-            switcher.list_accounts()
+            data = switcher.list_data()
 
-        out = capsys.readouterr().out
-        assert "(active)" in out
+        assert any(r.is_active for r in data.rows)
 
     def test_migration_uses_live_config_over_backup(
         self, temp_home, sample_sequence_data_pre_v06
@@ -3832,11 +3825,11 @@ class TestMacosKeychainFallback:
 
     def test_list_active_shows_keychain_unavailable(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict,
-        monkeypatch, block_real_keychain, capsys
+        monkeypatch, block_real_keychain
     ):
-        # Regression: the active account rendered "no credentials" when the
-        # Keychain was merely locked, nudging the user into an unnecessary
-        # re-login. It must now read "keychain unavailable" instead.
+        # Regression: the active account read "no credentials" when the Keychain
+        # was merely locked, nudging the user into an unnecessary re-login. It
+        # must now carry the "keychain unavailable" sentinel instead.
         sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
         s = self._macos_switcher()
         s._write_json(s.sequence_file, sample_sequence_data)
@@ -3844,12 +3837,12 @@ class TestMacosKeychainFallback:
         monkeypatch.setattr("claude_swap.credentials._ACTIVE_READ_RETRY_DELAY", 0)
         assert not get_credentials_path().exists()
 
-        s.list_accounts()
-        out = capsys.readouterr().out
-        assert "test@example.com" in out and "(active)" in out
-        # The active row shows the intentional, actionable line — not the
+        data = s.list_data()
+        active = next(r for r in data.rows if r.is_active)
+        assert active.email == "test@example.com"
+        # The active row carries the intentional, actionable sentinel — not the
         # misleading "no credentials" that prompted the re-login.
-        assert "keychain unavailable — locked or in use; try again" in out
+        assert active.usage.sentinel == USAGE_KEYCHAIN_UNAVAILABLE
 
     def test_active_write_falls_back_to_file_and_clears_stale_keychain(
         self, temp_home: Path, monkeypatch, block_real_keychain
@@ -4048,127 +4041,6 @@ class TestMacosKeychainFallback:
         s._last_active_credentials_backend = "keychain"
         s._print_switch_followup()
         assert "30 seconds" in capsys.readouterr().out
-
-
-class TestFormatUsageLines:
-    """Test _format_usage_lines rendering, including per-model scoped windows."""
-
-    def test_scoped_lines_render_per_model_with_at_limit_marker(self):
-        usage = {
-            "five_hour": {"pct": 7.0, "clock": "20:39", "countdown": "1h 30m"},
-            "seven_day": {"pct": 72.0, "clock": "21:59", "countdown": "3h"},
-            "scoped": [
-                {"name": "Fable", "pct": 100.0, "clock": "21:59", "countdown": "3h"},
-            ],
-        }
-        lines = _format_usage_lines(usage)
-        assert lines[0].startswith("5h:")
-        assert lines[1].startswith("7d:")
-        fable = lines[2]
-        assert fable.startswith("Fable:")
-        assert "100%" in fable
-        assert fable.rstrip().endswith("(!)")  # at/over limit marker
-
-    def test_scoped_under_limit_has_no_marker(self):
-        usage = {"scoped": [{"name": "Fable", "pct": 40.0, "clock": "21:59", "countdown": "3h"}]}
-        lines = _format_usage_lines(usage)
-        assert len(lines) == 1
-        assert lines[0].startswith("Fable:")
-        assert "40%" in lines[0]
-        assert "resets 21:59" in lines[0]
-        assert "in 3h" in lines[0]
-        assert not lines[0].rstrip().endswith("(!)")
-
-    def test_scoped_without_clock_renders_pct_only(self):
-        usage = {"scoped": [{"name": "Fable", "pct": 100.0}]}
-        lines = _format_usage_lines(usage)
-        assert lines == ["Fable: 100%  (!)"]
-
-    def test_countdown_recomputed_from_resets_at_not_cached_strings(self):
-        # A measurement served from the store hours after its fetch still
-        # carries the countdown frozen at fetch time; rendering must derive
-        # the live value from resets_at instead (issue: "resets 15:59 in 17h"
-        # printed when the reset was 15h away).
-        from datetime import datetime, timedelta, timezone
-
-        resets_at = (datetime.now(timezone.utc) + timedelta(hours=2, minutes=30)).isoformat()
-        usage = {
-            "seven_day": {
-                "pct": 62.0,
-                "resets_at": resets_at,
-                "clock": "15:59",
-                "countdown": "17h 0m",
-            }
-        }
-        line = _format_usage_lines(usage)[0]
-        assert "in 2h" in line
-        assert "17h" not in line
-
-    def test_reset_falls_back_to_cached_strings_without_resets_at(self):
-        # Entries persisted by older versions have no resets_at — the
-        # fetch-time strings are the best available then.
-        usage = {"seven_day": {"pct": 62.0, "clock": "15:59", "countdown": "17h 0m"}}
-        line = _format_usage_lines(usage)[0]
-        assert "resets 15:59" in line
-        assert "in 17h 0m" in line
-
-    def test_reset_falls_back_on_unparseable_resets_at(self):
-        usage = {
-            "seven_day": {
-                "pct": 62.0,
-                "resets_at": "not-a-date",
-                "clock": "15:59",
-                "countdown": "17h 0m",
-            }
-        }
-        line = _format_usage_lines(usage)[0]
-        assert "resets 15:59" in line
-        assert "in 17h 0m" in line
-
-    def test_spend_clock_recomputed_from_resets_at(self):
-        from datetime import datetime, timedelta, timezone
-
-        now = datetime.now(timezone.utc)
-        resets_at = (now + timedelta(hours=2)).isoformat()
-        expected_clock = oauth.format_reset(resets_at)[1]
-        usage = {
-            "spend": {
-                "used": 1.0,
-                "limit": 10.0,
-                "pct": 10.0,
-                "currency": "USD",
-                "resets_at": resets_at,
-                "clock": "stale-clock",
-            }
-        }
-        line = _format_usage_lines(usage)[0]
-        assert f"resets {expected_clock}" in line
-        assert "stale-clock" not in line
-
-    def test_no_scoped_key_renders_only_standard_windows(self):
-        usage = {"five_hour": {"pct": 7.0}, "seven_day": {"pct": 72.0}}
-        lines = _format_usage_lines(usage)
-        assert all(not line.startswith("Fable:") for line in lines)
-
-    def test_scoped_labels_align_columns_with_standard_windows(self):
-        usage = {
-            "five_hour": {"pct": 0.0},
-            "seven_day": {"pct": 62.0, "clock": "Jul 5 08:59", "countdown": "1d 19h"},
-            "scoped": [
-                {"name": "Fable", "pct": 100.0, "clock": "Jul 5 08:59", "countdown": "1d 19h"},
-            ],
-        }
-        lines = _format_usage_lines(usage)
-        # Labels are padded to the widest ("Fable:"), so the % column lines up.
-        assert lines[0] == "5h:      0%"
-        assert lines[1].startswith("7d:     62%   resets Jul 5 08:59")
-        assert lines[2].startswith("Fable: 100%   resets Jul 5 08:59")
-        assert len({line.index("%") for line in lines}) == 1
-
-    def test_standard_windows_alone_keep_legacy_layout(self):
-        usage = {"five_hour": {"pct": 7.0, "clock": "20:39", "countdown": "1h 30m"}}
-        lines = _format_usage_lines(usage)
-        assert lines == ["5h:   7%   resets 20:39         in 1h 30m"]
 
 
 class TestListData:

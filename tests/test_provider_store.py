@@ -84,7 +84,7 @@ def test_codex_store_adds_and_lists_account(
     monkeypatch.setattr(store, "_run_headless_login", lambda: _fake_codex_login(store, auth_payload))
 
     store.add_account(label="work", slot=1)
-    payload = store.list_accounts(json_output=True)
+    payload = store.list_accounts()
 
     assert backend_calls == [(json.dumps(auth_payload), 10.0)]
     assert payload["schemaVersion"] == 1
@@ -160,7 +160,7 @@ def test_codex_provider_store_ignores_existing_codex_backup(temp_home: Path) -> 
     (legacy_auth / "account-1.json").write_text("{}", encoding="utf-8")
 
     store = _codex_store()
-    payload = store.list_accounts(json_output=True)
+    payload = store.list_accounts()
 
     assert not store.sequence_file.exists()
     assert not (store.auth_dir / "account-1.json").exists()
@@ -183,7 +183,7 @@ def test_provider_store_rejects_nonnumeric_account_keys(temp_home: Path) -> None
     )
 
     with pytest.raises(ConfigError, match="state account keys must be numeric"):
-        store.list_accounts(json_output=True)
+        store.list_accounts()
 
 
 def test_openai_switch_refuses_before_stored_auth_lookup(temp_home: Path) -> None:
@@ -565,7 +565,7 @@ def test_inactive_expired_account_is_refreshed_and_persisted(
     monkeypatch.setattr(store.definition.backend, "refresh_auth", fake_refresh)
     monkeypatch.setattr(store.definition.backend, "fetch_usage", fake_fetch)
 
-    payload = store.list_accounts(json_output=True)
+    payload = store.list_accounts()
 
     assert len(refresh_calls) == 1  # only the inactive expired account
     assert json.loads(refresh_calls[0])["tokens"]["account_id"] == "acct-2"
@@ -594,7 +594,7 @@ def test_active_account_is_never_refreshed_even_when_expired(
         store.definition.backend, "fetch_usage", lambda auth_text, timeout_s: {"windows": []}
     )
 
-    store.list_accounts(json_output=True)
+    store.list_accounts()
 
     assert refresh_calls == []
 
@@ -618,7 +618,7 @@ def test_refresh_discarded_when_account_becomes_active_mid_refresh(
         store.definition.backend, "fetch_usage", lambda auth_text, timeout_s: {"windows": []}
     )
 
-    payload = store.list_accounts(json_output=True)
+    payload = store.list_accounts()
 
     assert store._auth_backup_path("2").read_text(encoding="utf-8") == original_text
     rows = {row["number"]: row for row in payload["accounts"]}
@@ -645,7 +645,7 @@ def test_refresh_discarded_when_disk_auth_changed_mid_refresh(
         store.definition.backend, "fetch_usage", lambda auth_text, timeout_s: {"windows": []}
     )
 
-    store.list_accounts(json_output=True)
+    store.list_accounts()
 
     assert store._auth_backup_path("2").read_text(encoding="utf-8") == concurrent
 
@@ -673,7 +673,7 @@ def test_persist_write_failure_is_transient_error_not_success(
 
     monkeypatch.setattr(store, "_write_account_auth", broken_write)
 
-    payload = store.list_accounts(json_output=True)
+    payload = store.list_accounts()
 
     rows = {row["number"]: row for row in payload["accounts"]}
     assert rows[2]["usageStatus"] == "unavailable"
@@ -697,7 +697,7 @@ def test_transient_refresh_failure_backs_off_without_persist(
         store.definition.backend, "fetch_usage", lambda auth_text, timeout_s: {"windows": []}
     )
 
-    payload = store.list_accounts(json_output=True)
+    payload = store.list_accounts()
 
     assert store._auth_backup_path("2").read_text(encoding="utf-8") == original_text
     rows = {row["number"]: row for row in payload["accounts"]}
@@ -722,7 +722,7 @@ def test_no_refresh_token_falls_through_to_plain_fetch(
 
     monkeypatch.setattr(store.definition.backend, "fetch_usage", fake_fetch)
 
-    store.list_accounts(json_output=True)
+    store.list_accounts()
 
     # The real refresh_auth returned no_refresh_token; usage was still fetched
     # with the on-disk auth, unchanged.
@@ -744,7 +744,7 @@ def test_opencode_accounts_never_hit_the_refresh_path(
 
     monkeypatch.setattr(store.definition.backend, "fetch_usage", fake_fetch)
 
-    store.list_accounts(json_output=True)
+    store.list_accounts()
 
     assert len(fetch_calls) == 1  # fetched as today, no refresh interference
 
@@ -771,13 +771,13 @@ def test_invalid_grant_quarantines_account_and_reports_relogin(
     monkeypatch.setattr(store.definition.backend, "refresh_auth", fake_refresh)
     monkeypatch.setattr(store.definition.backend, "fetch_usage", fake_fetch)
 
-    payload = store.list_accounts(json_output=True)
+    payload = store.list_accounts()
     rows = {row["number"]: row for row in payload["accounts"]}
     assert rows[2]["usageStatus"] == "relogin_required"
     assert "acct-2" not in fetched  # the dead account's usage was never fetched
 
     # A second pass must not retry the dead refresh token (quarantine).
-    payload = store.list_accounts(json_output=True)
+    payload = store.list_accounts()
     assert len(refresh_calls) == 1
     rows = {row["number"]: row for row in payload["accounts"]}
     assert rows[2]["usageStatus"] == "relogin_required"
@@ -786,8 +786,12 @@ def test_invalid_grant_quarantines_account_and_reports_relogin(
 def test_relogin_needed_appears_in_human_output(
     temp_home: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """Human `list` renders the re-login hint for a quarantined account."""
+    from typer.testing import CliRunner
+
+    from claude_swap.cli import app
+
     store = _seeded_codex_store(
         {"1": _codex_oauth_auth("acct-1", _FRESH), "2": _codex_oauth_auth("acct-2", _EXPIRED)},
         active="1",
@@ -800,12 +804,17 @@ def test_relogin_needed_appears_in_human_output(
     monkeypatch.setattr(
         store.definition.backend, "fetch_usage", lambda auth_text, timeout_s: {"windows": []}
     )
+    # The CLI builds its own store via get_provider; route it to this seeded,
+    # monkeypatched one so the human render path sees the quarantined account.
+    monkeypatch.setattr("claude_swap.cli.get_provider", lambda frontend, backend: store)
+    # Force a wide render width so the warn-styled hint never wraps mid-command.
+    monkeypatch.setenv("COLUMNS", "200")
 
-    store.list_accounts(json_output=False)
+    result = CliRunner().invoke(app, ["codex", "openai", "list"])
 
-    out = capsys.readouterr().out
-    assert "re-login needed" in out
-    assert "cswap codex openai add" in out
+    assert result.exit_code == 0, result.output
+    assert "re-login needed" in result.output
+    assert "cswap codex openai add" in result.output
 
 
 def test_materialize_active_auth_replaces_symlink_with_real_file(temp_home: Path) -> None:

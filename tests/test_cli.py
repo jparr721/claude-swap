@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
 
 from claude_swap.cli import app
+from claude_swap.models import ClaudeListData, ClaudeStatusData
 
 runner = CliRunner()
 
@@ -37,23 +39,31 @@ class _StubSwitcher:
     def _is_running_in_container(self) -> bool:
         return False
 
-    def list_accounts(
-        self, show_token_status: bool = False, json_output: bool = False
-    ) -> dict | None:
-        self.calls.append(
-            ("list_accounts", {"show_token_status": show_token_status, "json_output": json_output})
-        )
-        if json_output:
-            return {"schemaVersion": 1, "activeAccountNumber": None, "accounts": []}
-        print("Accounts:")
-        return None
+    def list_accounts(self) -> dict:
+        self.calls.append(("list_accounts", {}))
+        return {"schemaVersion": 1, "activeAccountNumber": None, "accounts": []}
+
+    def list_data(
+        self, show_token_status: bool = False, on_fetch: object = None
+    ) -> ClaudeListData:
+        self.calls.append(("list_data", {"show_token_status": show_token_status}))
+        return ClaudeListData(first_run_needed=False, rows=[])
+
+    def first_run_setup(self) -> None:
+        self.calls.append(("first_run_setup", {}))
 
     def purge(self) -> None:
         self.calls.append(("purge", {}))
 
-    def status(self, json_output: bool = False) -> dict | None:
-        self.calls.append(("status", {"json_output": json_output}))
-        return {"schemaVersion": 1, "active": None} if json_output else None
+    def status(self) -> dict:
+        self.calls.append(("status", {}))
+        return {"schemaVersion": 1, "active": None}
+
+    def status_data(self) -> ClaudeStatusData:
+        self.calls.append(("status_data", {}))
+        return ClaudeStatusData(
+            email=None, account_number=None, tag="", total_accounts=0, usage=None
+        )
 
     def add_account(self, slot: int | None = None, assume_yes: bool = False) -> None:
         self.calls.append(("add_account", {"slot": slot}))
@@ -101,15 +111,13 @@ def test_ls_aggregates_with_schema_v2_envelope(stub_switcher: type[_StubSwitcher
     assert payload["schemaVersion"] == 2
     assert payload["providers"]["claude"]["default"]["accounts"] == []
     assert stub_switcher.last is not None
-    assert stub_switcher.last.calls == [
-        ("list_accounts", {"show_token_status": False, "json_output": True})
-    ]
+    assert stub_switcher.last.calls == [("list_accounts", {})]
 
 
 def test_ls_human_mode_prints_accounts(stub_switcher: type[_StubSwitcher]) -> None:
     result = runner.invoke(app, ["ls"])
     assert result.exit_code == 0
-    assert "Accounts:" in result.stdout
+    assert "Claude Code" in result.stdout
 
 
 def test_purge_routes_to_switcher(stub_switcher: type[_StubSwitcher]) -> None:
@@ -226,10 +234,7 @@ def test_claude_list_is_claude_only(stub_switcher: type[_StubSwitcher]) -> None:
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["schemaVersion"] == 1  # NOT the aggregate v2 envelope
-    assert _last_call(stub_switcher) == (
-        "list_accounts",
-        {"show_token_status": False, "json_output": True},
-    )
+    assert _last_call(stub_switcher) == ("list_accounts", {})
 
 
 def test_claude_list_token_status_conflicts_with_json(
@@ -244,7 +249,7 @@ def test_claude_list_token_status_conflicts_with_json(
 def test_claude_status(stub_switcher: type[_StubSwitcher]) -> None:
     result = runner.invoke(app, ["claude", "default", "status"])
     assert result.exit_code == 0
-    assert _last_call(stub_switcher) == ("status", {"json_output": False})
+    assert _last_call(stub_switcher) == ("status_data", {})
 
 
 def test_claude_add_with_slot(stub_switcher: type[_StubSwitcher]) -> None:
@@ -360,7 +365,7 @@ def test_claude_json_error_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
     from claude_swap.exceptions import ConfigError
 
     class _BrokenSwitcher(_StubSwitcher):
-        def status(self, json_output: bool = False) -> dict | None:
+        def status(self) -> dict:
             raise ConfigError("boom")
 
     monkeypatch.setattr("claude_swap.cli.ClaudeAccountSwitcher", _BrokenSwitcher)
@@ -434,21 +439,27 @@ def test_auto_once_exit_code_reflects_tick_outcome(
 class _StubProviderStore:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
+        self.definition = SimpleNamespace(
+            display_name="Codex",
+            ref=SimpleNamespace(frontend="codex", backend="openai"),
+        )
 
-    def list_accounts(self, json_output: bool = False) -> dict | None:
-        self.calls.append(("list_accounts", {"json_output": json_output}))
-        if json_output:
-            return {
-                "schemaVersion": 1,
-                "provider": {"frontend": "codex", "backend": "openai"},
-                "activeAccountNumber": None,
-                "accounts": [],
-            }
-        return None
+    def list_accounts(self) -> dict:
+        self.calls.append(("list_accounts", {}))
+        return {
+            "schemaVersion": 1,
+            "provider": {"frontend": "codex", "backend": "openai"},
+            "activeAccountNumber": None,
+            "accounts": [],
+        }
 
-    def status(self, json_output: bool = False) -> dict | None:
-        self.calls.append(("status", {"json_output": json_output}))
-        return {"schemaVersion": 1, "active": None} if json_output else None
+    def list_data(self, on_fetch: object = None) -> list:
+        self.calls.append(("list_data", {}))
+        return []
+
+    def status(self) -> dict:
+        self.calls.append(("status", {}))
+        return {"schemaVersion": 1, "active": None}
 
     def add_account(self, label: str | None, slot: int | None) -> None:
         self.calls.append(("add_account", {"label": label, "slot": slot}))
@@ -477,7 +488,7 @@ def test_codex_list_json(stub_provider: dict[str, object]) -> None:
     result = runner.invoke(app, ["codex", "openai", "list", "--json"])
     assert result.exit_code == 0
     assert stub_provider["ref"] == ("codex", "openai")
-    assert stub_provider["store"].calls == [("list_accounts", {"json_output": True})]
+    assert stub_provider["store"].calls == [("list_accounts", {})]
     assert json.loads(result.stdout)["schemaVersion"] == 1
 
 
@@ -601,24 +612,27 @@ def test_ls_human_mode_appends_provider_accounts(
     stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`ls` renders provider sections after Claude when they have accounts."""
-    from unittest.mock import MagicMock, call
+    from unittest.mock import MagicMock
+
+    from claude_swap.providers.types import ProviderAccountRow
+    from claude_swap.usage_store import UsageEntry
 
     provider_store = MagicMock()
+    provider_store.definition.display_name = "Codex"
     provider_store.definition.ref.frontend = "codex"
-    provider_store.definition.frontend.display_name = "Codex"
-    provider_store.list_accounts.side_effect = [
-        {"schemaVersion": 1, "provider": "codex", "accounts": [{"number": 1}]},
-        None,
+    provider_store.definition.ref.backend = "openai"
+    provider_store.list_data.return_value = [
+        ProviderAccountRow(
+            number="1", label="work", is_active=True, usage=UsageEntry()
+        )
     ]
     monkeypatch.setattr(
         "claude_swap.cli.managed_aggregate_providers", lambda: [provider_store]
     )
     result = runner.invoke(app, ["ls"])
     assert result.exit_code == 0
-    assert provider_store.list_accounts.call_args_list == [
-        call(json_output=True),
-        call(json_output=False),
-    ]
+    provider_store.list_data.assert_called_once()
+    assert "Codex" in result.stdout
 
 
 def test_ls_human_mode_survives_corrupt_provider_state(
@@ -630,8 +644,9 @@ def test_ls_human_mode_survives_corrupt_provider_state(
     from claude_swap.exceptions import ConfigError
 
     provider_store = MagicMock()
+    provider_store.definition.display_name = "Codex"
     provider_store.definition.frontend.display_name = "Codex"
-    provider_store.list_accounts.side_effect = ConfigError(
+    provider_store.list_data.side_effect = ConfigError(
         "Codex state file is not valid JSON"
     )
     monkeypatch.setattr(

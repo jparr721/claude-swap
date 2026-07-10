@@ -193,7 +193,7 @@ def test_codex_wrapper_uses_provider_store_and_compat_usage_hook(
     monkeypatch.setattr(switcher._store, "_run_headless_login", fake_login)
 
     switcher.add_account(label="work", slot=1)
-    payload = switcher.list_accounts(json_output=True)
+    payload = switcher.list_accounts()
 
     assert calls == [(json.dumps(_codex_auth("acct-1")), CODEX_USAGE_TIMEOUT_S)]
     assert payload["schemaVersion"] == 1
@@ -221,12 +221,12 @@ def test_opencode_wrapper_refuses_to_restore_openai_oauth_snapshot(
 
     active = json.loads(auth_path.read_text(encoding="utf-8"))
     assert active["openai"]["accountId"] == "acct-2"
-    assert switcher.status(json_output=True)["active"] == {
+    assert switcher.status()["active"] == {
         "number": 2,
         "label": "two",
         "managed": True,
     }
-    assert switcher.list_accounts(json_output=True)["provider"] == {
+    assert switcher.list_accounts()["provider"] == {
         "frontend": "opencode",
         "backend": "openai",
     }
