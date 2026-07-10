@@ -141,7 +141,10 @@ def get_timestamp() -> str:
 
 
 # Progress callback for usage collection: (done, total, label). Wired by the
-# CLI's fetch spinner; every non-CLI caller passes None.
+# CLI's fetch spinner; every non-CLI caller passes None. Invocations are
+# serialized and `done` is monotonic (1..N in call order), but they MAY come
+# from worker threads - implementations must not assume the calling thread
+# (rich's Status.update is safe; it locks internally).
 FetchProgress = Callable[[int, int, str], None]
 
 

@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -1684,6 +1685,17 @@ class ClaudeAccountSwitcher:
         """Fetch the given accounts in parallel, staggering request starts so
         N accounts never hit the endpoint in the same instant."""
         total = len(infos)
+        # Workers run concurrently, so the callback is serialized behind a lock
+        # and `done` is the invocation count (1..N in call order) rather than
+        # each worker's pre-assigned index, which could arrive out of order.
+        tick_lock = threading.Lock()
+        ticked = 0
+
+        def _tick(email: str) -> None:
+            nonlocal ticked
+            with tick_lock:
+                ticked += 1
+                on_fetch(ticked, total, email)
 
         def fetch_one(
             idx_info: tuple[int, tuple[int, str, str, str, bool, str]]
@@ -1692,7 +1704,7 @@ class ClaudeAccountSwitcher:
             if idx and _FETCH_STAGGER_S:
                 time.sleep(idx * _FETCH_STAGGER_S)
             if on_fetch is not None:
-                on_fetch(idx + 1, total, info[1])
+                _tick(info[1])
             return str(info[0]), self._fetch_account_usage(info)
 
         with ThreadPoolExecutor() as executor:

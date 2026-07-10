@@ -883,6 +883,8 @@ def test_materialize_active_auth_unreadable_target_raises(
     with pytest.raises(ConfigError, match="Failed to read"):
         store.materialize_active_auth()
 
+    assert store.auth_path.is_symlink()
+
 
 def test_provider_list_data_rows_and_on_fetch(
     temp_home: Path, monkeypatch: pytest.MonkeyPatch
@@ -900,5 +902,3 @@ def test_provider_list_data_rows_and_on_fetch(
     assert [(r.number, r.is_active) for r in rows] == [("1", True), ("2", False)]
     assert all(r.label.startswith("acct-label-") for r in rows)
     assert len(calls) == 2 and calls[0] == (1, 2, "acct-label-1")
-
-    assert store.auth_path.is_symlink()
