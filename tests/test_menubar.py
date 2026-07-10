@@ -87,6 +87,33 @@ def test_usage_summary_partial_windows():
     assert menubar.usage_summary({"five_hour": {"pct": 5.0}}) == "5h 5%"
 
 
+def test_usage_summary_includes_scoped_model_limits():
+    # Per-model weekly limits (e.g. Fable) come through as usage["scoped"], after
+    # 5h/7d and before spend.
+    usage = {
+        "five_hour": {"pct": 82.0},
+        "seven_day": {"pct": 12.0},
+        "scoped": [{"name": "Fable", "pct": 4.0}],
+        "spend": {"pct": 30.0},
+    }
+    assert menubar.usage_summary(usage) == "5h 82% · 7d 12% · Fable 4% · $ 30%"
+
+
+def test_usage_summary_scoped_over_limit_marker():
+    usage = {"scoped": [{"name": "Fable", "pct": 100.0}]}
+    assert menubar.usage_summary(usage) == "Fable 100% (!)"
+
+
+def test_usage_summary_scoped_multiple_and_countdown():
+    usage = {
+        "scoped": [
+            {"name": "Fable", "pct": 4.0, "resets_at": _iso(2 * 3600)},
+            {"name": "Opus", "pct": 55.0},
+        ],
+    }
+    assert menubar.usage_summary(usage, _NOW) == "Fable 4% (2h 0m) · Opus 55%"
+
+
 def test_usage_summary_string_sentinel_passthrough():
     assert menubar.usage_summary("no credentials") == "no credentials"
 

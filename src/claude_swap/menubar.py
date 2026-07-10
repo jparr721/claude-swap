@@ -156,6 +156,16 @@ def usage_summary(usage: dict | str | None, now: float | None = None) -> str:
             if countdown:
                 seg += f" ({countdown})"  # time until this window resets
             parts.append(seg)
+    # Per-model weekly limits (e.g. Fable), from the usage API's ``limits`` array.
+    for window in usage.get("scoped") or []:
+        if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)) and window.get("name"):
+            seg = f"{window['name']} {window['pct']:.0f}%"
+            if window["pct"] >= 100:
+                seg += " (!)"  # maxed model — the usual reason to switch
+            countdown = _live_countdown(window, now)
+            if countdown:
+                seg += f" ({countdown})"
+            parts.append(seg)
     spend = usage.get("spend")
     if isinstance(spend, dict) and isinstance(spend.get("pct"), (int, float)):
         parts.append(f"$ {spend['pct']:.0f}%")
