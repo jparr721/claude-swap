@@ -2405,17 +2405,13 @@ class ClaudeAccountSwitcher:
         Returns ``{"from": ref|None, "to": ref, "warnings": [...]}``, capturing the
         left/landed identities under the lock so callers don't reconstruct ``from``
         after the mutation. When ``emit_output`` is False (JSON mode) all human
-        output is suppressed — the live-session warning, the "Switched"/"Activated"
-        lines, the nested list_accounts() summary and the followup — and the
-        live-session warning rides back in ``warnings`` instead.
+        output is suppressed - the live-session warning and the "Switched"/"Activated"
+        lines - and the live-session warning rides back in ``warnings`` instead.
 
         ``force_activate`` routes through the direct activation path even when a
         managed live login exists: the stored backup is written over the live
         credentials without backing the live ones up first (post-import recovery
         when the live login is stale).
-
-        The post-switch display runs after the lock releases so that persist
-        callbacks inside list_accounts() can re-acquire it.
         """
         warnings_out: list[str] = []
         # Session-mode drift warning (warn, never block): switching the
@@ -2694,17 +2690,9 @@ class ClaudeAccountSwitcher:
                         )
                 raise
 
-        # Lock released. Safe to do network I/O and let persist callbacks
-        # re-acquire the lock from inside list_accounts(). All of this is display
-        # only — suppressed in JSON mode (the nested list_accounts() would
-        # otherwise leak human output onto the JSON stdout).
+        # Lock released.
         if emit_output:
             print(f"{accent('Switched to')} Account-{target_account} ({target_email})")
-            try:
-                self.list_accounts()
-            except Exception as e:
-                self._logger.warning(f"Post-switch usage display failed: {e!r}")
-                print(dimmed("  (usage display unavailable — run `cswap claude default list` to retry)"))
             print()
             self._print_switch_followup()
             print()
@@ -2727,7 +2715,7 @@ class ClaudeAccountSwitcher:
             backend = "keychain" if self._use_keychain() else "file"
         if backend == "keychain":
             print(dimmed(
-                "Restart Claude Code to apply immediately — otherwise the "
+                "Restart Claude Code to apply immediately - otherwise the "
                 "session can take up to ~30 seconds to pick up the new account."
             ))
         else:

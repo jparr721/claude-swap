@@ -544,11 +544,21 @@ def claude_switch(
     def action() -> dict | None:
         switcher = _init_switcher(debug)
         if resolved is None:
-            return switcher.switch(
+            result = switcher.switch(
                 strategy=strategy.value if strategy is not None else None,
                 json_output=json_output,
             )
-        return switcher.switch_to(resolved, json_output=json_output, force=force)
+        else:
+            result = switcher.switch_to(resolved, json_output=json_output, force=force)
+        if not json_output:
+            try:
+                _render_claude_accounts(switcher, token_status=False)
+            except Exception:
+                _logger.debug("post-switch account render failed", exc_info=True)
+                render.console.print(
+                    "usage display unavailable - run: cswap claude default list", style="dim"
+                )
+        return result
 
     _dispatch(action, json_mode=json_output, update_check=True)
 

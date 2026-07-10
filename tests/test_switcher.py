@@ -1210,29 +1210,34 @@ class TestPerformSwitchPostDisplay:
         mock_claude_config: Path,
         sample_sequence_data: dict,
     ):
-        """Regression: _perform_switch must persist refreshed credentials to backup.
+        """Regression: a usage collection right after _perform_switch must
+        persist refreshed credentials to backup, not deadlock.
 
-        Prior to the fix, _perform_switch held the outer FileLock around
-        list_accounts(). Inside list_accounts(), the persist closure tried to
-        re-acquire the same file lock (different FD, so fcntl.flock is NOT
-        re-entrant), spun to the 10s timeout, raised LockError, and the
-        refreshed credentials were silently dropped at debug level. If
-        Anthropic rotated the refresh token on that request, the backup
-        retained the old (now-invalid) refresh token and the only recovery
-        was a re-login.
+        Prior to the fix, _perform_switch held the outer FileLock around a
+        nested list_accounts() call it used for its own post-switch display.
+        Inside list_accounts(), the persist closure tried to re-acquire the
+        same file lock (different FD, so fcntl.flock is NOT re-entrant), spun
+        to the 10s timeout, raised LockError, and the refreshed credentials
+        were silently dropped at debug level. If Anthropic rotated the
+        refresh token on that request, the backup retained the old
+        (now-invalid) refresh token and the only recovery was a re-login.
 
-        This test exercises the full _perform_switch path with account 2
-        needing a refresh, and verifies the rotated refresh token actually
-        landed on disk. Against main this fails; against the fix it passes.
+        list_accounts() no longer runs nested inside _perform_switch - the CLI
+        calls it separately, right after the switch, to render the post-switch
+        table - but the two calls still cross the same file lock boundary, so
+        this test exercises that sequence directly: _perform_switch followed
+        by list_accounts(), with account 2 needing a refresh, verifying the
+        rotated refresh token actually lands on disk. Against the original bug
+        this fails; against the fix it passes.
         """
         switcher, creds_store, configs_store = self._setup_two_accounts(
             temp_home, sample_sequence_data,
         )
         # The currently-active account 1's creds carry an expired expiresAt.
         # After the swap, account 1 becomes *inactive* and its just-backed-up
-        # credentials are eligible for proactive refresh inside the
-        # post-switch list_accounts() call. This is the scenario that
-        # triggers the original deadlock bug.
+        # credentials are eligible for proactive refresh on the next
+        # list_accounts() call. This is the scenario that triggers the
+        # original deadlock bug.
         live_state = {"creds": json.dumps({
             "claudeAiOauth": {
                 "accessToken": "sk-live-1",
@@ -1271,19 +1276,22 @@ class TestPerformSwitchPostDisplay:
                 },
             ):
                 switcher._perform_switch("2")
+                # Mirrors the CLI's post-switch table render, which is what
+                # now drives this usage collection (see cli.py claude_switch).
+                switcher.list_accounts()
         finally:
             for p in patches:
                 p.stop()
 
         # After switch, backup for account 1 (now inactive) must contain the
-        # rotated refresh token — confirming the persist inside list_accounts()
+        # rotated refresh token - confirming the persist inside list_accounts()
         # actually fired and didn't hit the lock deadlock.
         backup_after = creds_store.get(("1", "test@example.com"), "")
         assert backup_after, "backup credentials for account 1 are missing"
         backup_oauth = json.loads(backup_after)["claudeAiOauth"]
         assert backup_oauth["refreshToken"] == "rt-rotated-1", (
             f"Expected rotated refresh token on disk, got "
-            f"{backup_oauth.get('refreshToken')!r} — lock deadlock regression"
+            f"{backup_oauth.get('refreshToken')!r} - lock deadlock regression"
         )
         assert backup_oauth["accessToken"] == "sk-rotated-1"
 
@@ -1318,56 +1326,6 @@ class TestPerformSwitchPostDisplay:
                 p.stop()
         # The departing account's good backup is untouched (not wiped to empty).
         assert creds_store[("1", "test@example.com")] == good_backup
-
-    def test_switch_survives_post_display_failure(
-        self,
-        temp_home: Path,
-        mock_claude_config: Path,
-        sample_sequence_data: dict,
-        capsys,
-    ):
-        """Regression: a failure inside post-switch list_accounts() must not
-        propagate as a switch failure. The swap already committed; the display
-        is best-effort.
-        """
-        switcher, creds_store, configs_store = self._setup_two_accounts(
-            temp_home, sample_sequence_data,
-        )
-        live_state = {"creds": json.dumps({
-            "claudeAiOauth": {
-                "accessToken": "sk-live-1",
-                "refreshToken": "rt-live-1",
-            },
-        })}
-        patches = self._install_store_patches(
-            switcher, creds_store, configs_store, live_state,
-        )
-
-        # Pin platform so the post-switch followup message is deterministic
-        # across hosts (macOS prints a different note).
-        switcher.platform = Platform.LINUX
-
-        try:
-            with patch.object(
-                switcher,
-                "list_accounts",
-                side_effect=RuntimeError("boom"),
-            ):
-                # Must not raise
-                switcher._perform_switch("2")
-        finally:
-            for p in patches:
-                p.stop()
-
-        # Switch actually committed: sequence now points at account 2.
-        data = switcher._get_sequence_data()
-        assert data is not None
-        assert data["activeAccountNumber"] == 2
-
-        output = capsys.readouterr().out
-        assert "Switched to" in output
-        assert "usage display unavailable" in output
-        assert "no restart needed" in output
 
     def test_switch_followup_macos(self, temp_home: Path, capsys):
         """macOS shows the ~30s cache note; a restart applies it instantly."""

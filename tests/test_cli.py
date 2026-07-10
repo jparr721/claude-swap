@@ -273,7 +273,9 @@ def test_claude_add_token(stub_switcher: type[_StubSwitcher]) -> None:
 def test_claude_bare_switch_rotates(stub_switcher: type[_StubSwitcher]) -> None:
     result = runner.invoke(app, ["claude", "default", "switch"])
     assert result.exit_code == 0
-    assert _last_call(stub_switcher) == (
+    # The switch call itself lands first; the post-switch table render
+    # (list_data) follows it - see test_claude_switch_renders_accounts_table.
+    assert stub_switcher.last.calls[0] == (
         "switch",
         {"strategy": None, "json_output": False},
     )
@@ -282,7 +284,7 @@ def test_claude_bare_switch_rotates(stub_switcher: type[_StubSwitcher]) -> None:
 def test_claude_switch_with_strategy(stub_switcher: type[_StubSwitcher]) -> None:
     result = runner.invoke(app, ["claude", "default", "switch", "--strategy", "best"])
     assert result.exit_code == 0
-    assert _last_call(stub_switcher) == (
+    assert stub_switcher.last.calls[0] == (
         "switch",
         {"strategy": "best", "json_output": False},
     )
@@ -298,7 +300,7 @@ def test_claude_switch_rejects_unknown_strategy(
 def test_claude_switch_positional_target(stub_switcher: type[_StubSwitcher]) -> None:
     result = runner.invoke(app, ["claude", "default", "switch", "2"])
     assert result.exit_code == 0
-    assert _last_call(stub_switcher) == (
+    assert stub_switcher.last.calls[0] == (
         "switch_to",
         {"identifier": "2", "json_output": False, "force": False},
     )
@@ -309,10 +311,61 @@ def test_claude_switch_to_flag_and_force(stub_switcher: type[_StubSwitcher]) -> 
         app, ["claude", "default", "switch", "--to", "me@x.com", "--force"]
     )
     assert result.exit_code == 0
-    assert _last_call(stub_switcher) == (
+    assert stub_switcher.last.calls[0] == (
         "switch_to",
         {"identifier": "me@x.com", "json_output": False, "force": True},
     )
+
+
+def test_claude_switch_renders_accounts_table(stub_switcher: type[_StubSwitcher]) -> None:
+    """A successful human-mode switch renders the account table afterward."""
+    result = runner.invoke(app, ["claude", "default", "switch", "2"])
+    assert result.exit_code == 0
+    assert stub_switcher.last.calls[1] == ("list_data", {"show_token_status": False})
+
+
+def test_claude_switch_json_skips_table_render(stub_switcher: type[_StubSwitcher]) -> None:
+    """--json mode must never render the human account table."""
+    result = runner.invoke(app, ["claude", "default", "switch", "2", "--json"])
+    assert result.exit_code == 0
+    assert stub_switcher.last.calls == [
+        ("switch_to", {"identifier": "2", "json_output": True, "force": False}),
+    ]
+
+
+def test_claude_switch_survives_post_display_failure(
+    stub_switcher: type[_StubSwitcher], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a failure rendering the post-switch account table must not
+    turn a committed switch into a nonzero exit - the swap already happened
+    and the table render is best-effort.
+    """
+
+    def switch_to_and_print(
+        self: _StubSwitcher,
+        identifier: str,
+        json_output: bool = False,
+        force: bool = False,
+    ) -> dict | None:
+        self.calls.append(
+            ("switch_to", {"identifier": identifier, "json_output": json_output, "force": force})
+        )
+        print(f"Switched to Account-{identifier} (me@x.com)")
+        return None
+
+    def boom(
+        self: _StubSwitcher, show_token_status: bool = False, on_fetch: object = None
+    ) -> ClaudeListData:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(_StubSwitcher, "switch_to", switch_to_and_print)
+    monkeypatch.setattr(_StubSwitcher, "list_data", boom)
+
+    result = runner.invoke(app, ["claude", "default", "switch", "2"])
+
+    assert result.exit_code == 0
+    assert "Switched" in result.stdout
+    assert "usage display unavailable - run: cswap claude default list" in result.stdout
 
 
 def test_claude_switch_rejects_both_positional_and_to(
