@@ -486,3 +486,20 @@ class TestLast429Marker:
     def test_non_429_failures_leave_the_marker_alone(self, store, clock):
         store.record({"1": FetchRecord(error="timeout")}, IDENT)
         assert store.entries(IDENT)["1"].last_429_at is None
+
+
+class TestClaimTrustBridge:
+    def test_in_flight_claim_keeps_decision_trust(self, store, clock):
+        # Reservation loser scenario: the entry is poll-due and past
+        # STALE_OK_S, another process just won reserve() and is fetching.
+        # The loser must keep trusting last-good for the claim window instead
+        # of reading unknown (and e.g. counting an unhealthy tick).
+        store.record({"1": FetchRecord(usage=USAGE)}, IDENT)
+        store.set_poll_plan({"1": (clock.now + 400.0, 400.0)}, IDENT)
+        clock.advance(401)  # poll-due, age > STALE_OK_S
+        assert store.reserve(["1"], IDENT, respect_plans=True) == ["1"]
+        entry = store.entries(IDENT)["1"]
+        assert entry.trust_extended
+        assert entry.decision_value() == USAGE
+        clock.advance(CLAIM_TTL_S)  # claim expired, no result recorded
+        assert store.entries(IDENT)["1"].decision_value() is None

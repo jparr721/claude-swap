@@ -933,9 +933,23 @@ class AutoSwitchEngine:
         # persisted plan, or (no plan yet) past the normal cadence floor. The
         # collector's reserve() honors due-ness even inside the serve TTL, so
         # an urgent plan (60s while burning near the band) actually fetches.
+        # A candidate-style plan (slower than any active plan can be) left
+        # over from a role change the switcher never saw (e.g. a manual
+        # login) is overridden past the active age cap — but an exhausted
+        # account stays parked at its reset: its numbers cannot move until
+        # then, and the passed reset itself makes the plan due.
+        stale_candidate_plan = (
+            active_pre is not None
+            and active_pre.age_s is not None
+            and active_pre.age_s >= poll_policy.ACTIVE_MAX_INTERVAL_S
+            and (active_pre.poll_interval_s or 0.0)
+            > poll_policy.ACTIVE_MAX_INTERVAL_S
+            and (binding_pct(active_pre.last_good, self._models) or 0.0) < 100.0
+        )
         if (
             active_pre is None
             or active_pre.age_s is None
+            or stale_candidate_plan
             or (
                 active_pre.next_poll_at is not None
                 and now >= active_pre.next_poll_at

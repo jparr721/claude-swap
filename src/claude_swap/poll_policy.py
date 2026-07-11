@@ -167,8 +167,11 @@ def plan_after_fetch(
         moving = True
         interval = max(MIN_INTERVAL_S, base / 2)
     else:
+        # Floored so a sub-floor base (urgent mode's 60s) snaps straight back
+        # to the normal cadence once movement stops, instead of decaying
+        # through 90s/135s polls that the budget never intended.
         moving = False
-        interval = min(ceiling, base * 1.5)
+        interval = min(ceiling, max(MIN_INTERVAL_S, base * 1.5))
     if (
         is_active
         and moving

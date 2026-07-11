@@ -109,6 +109,17 @@ class TestUrgentMode:
         _, interval = _plan(**self._urgent_kwargs(recent_429=True))
         assert interval == poll_policy.POST_429_MIN_INTERVAL_S
 
+    def test_urgent_then_unmoved_snaps_back_to_the_floor(self):
+        # Once movement stops, the next interval is the normal floor — never
+        # a sub-floor decay chain (60 → 90 → 135 …) off the urgent base.
+        _, interval = _plan(
+            **self._urgent_kwargs(
+                prev_interval_s=poll_policy.URGENT_INTERVAL_S,
+                new_usage=_usage(78),  # unmoved
+            )
+        )
+        assert interval == poll_policy.MIN_INTERVAL_S
+
 
 class TestPost429Floor:
     def test_recent_429_floors_the_cadence(self):

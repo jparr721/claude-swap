@@ -309,21 +309,29 @@ class UsageStore:
             age_s = (now - fetched_at) if fetched_at is not None else None
             consecutive_failures = int(row.get("consecutiveFailures") or 0)
             next_poll_at = _num_or_none(row.get("nextPollAt"))
+            last_attempt_at = _num_or_none(row.get("lastAttemptAt"))
             # Strict < mirrors due_candidate: at nextPollAt the entry is due,
-            # its staleness no longer scheduler-chosen.
+            # its staleness no longer scheduler-chosen. A live claim keeps the
+            # trust bridge up: when another collector just won the fetch, this
+            # reader must not flip trusted → unknown (and e.g. count an
+            # unhealthy tick) for the seconds the result is in flight.
             trust_extended = (
                 age_s is not None
                 and age_s <= TRUST_MAX_AGE_S
                 and (
                     consecutive_failures > 0
                     or (next_poll_at is not None and now < next_poll_at)
+                    or (
+                        last_attempt_at is not None
+                        and (now - last_attempt_at) < CLAIM_TTL_S
+                    )
                 )
             )
             out[num] = UsageEntry(
                 last_good=last_good if isinstance(last_good, dict) else None,
                 fetched_at=fetched_at,
                 age_s=age_s,
-                last_attempt_at=_num_or_none(row.get("lastAttemptAt")),
+                last_attempt_at=last_attempt_at,
                 consecutive_failures=consecutive_failures,
                 last_error=row.get("lastError"),
                 backoff_until=_num_or_none(row.get("backoffUntil")),

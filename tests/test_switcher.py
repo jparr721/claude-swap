@@ -1019,6 +1019,72 @@ class TestListAccountsUsage:
         output = capsys.readouterr().out
         assert "25%" in output  # account 1 served from the store
 
+    def test_replan_new_active_pulls_candidate_plan_to_floor(
+        self, temp_home: Path, mock_claude_config: Path
+    ):
+        """A plan learned while the account idled as a candidate (up to 600s)
+        must not gate it once it becomes active."""
+        import time as time_mod
+
+        from claude_swap import poll_policy
+
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        ident = {"1": ("a@x.com", "")}
+        store = switcher._usage_store
+        store.record({"1": FetchRecord(usage={"five_hour": {"pct": 10}})}, ident)
+        store.set_poll_plan({"1": (time_mod.time() + 600.0, 600.0)}, ident)
+
+        switcher._replan_new_active("1", "a@x.com", "")
+        entry = store.entries(ident)["1"]
+        assert entry.poll_interval_s == poll_policy.MIN_INTERVAL_S
+        assert entry.next_poll_at <= time_mod.time() + poll_policy.MIN_INTERVAL_S + 1
+
+        # An already-eager plan (urgent cadence) is never pushed later.
+        store.set_poll_plan({"1": (time_mod.time() + 60.0, 60.0)}, ident)
+        switcher._replan_new_active("1", "a@x.com", "")
+        entry = store.entries(ident)["1"]
+        assert entry.poll_interval_s == 60.0
+
+        # A never-measured account gets no plan — a plan without a
+        # measurement would block on-demand callers from the first fetch.
+        ident2 = {"2": ("b@x.com", "")}
+        switcher._replan_new_active("2", "b@x.com", "")
+        assert store.entries(ident2)["2"].next_poll_at is None
+
+        # An already-old measurement comes due immediately, not 180s from now.
+        old_store = UsageStore(
+            switcher.backup_dir / "cache", clock=lambda: time_mod.time() - 400
+        )
+        old_store.record(
+            {"2": FetchRecord(usage={"five_hour": {"pct": 10}})}, ident2
+        )
+        store.set_poll_plan({"2": (time_mod.time() + 600.0, 600.0)}, ident2)
+        switcher._replan_new_active("2", "b@x.com", "")
+        entry = store.entries(ident2)["2"]
+        assert entry.next_poll_at <= time_mod.time() + 1
+
+    def test_replan_new_active_failure_is_logged_not_raised(
+        self, temp_home: Path, mock_claude_config: Path, caplog
+    ):
+        """The switch this rides on has already committed — a cache failure
+        here must never surface as a switch failure."""
+        import logging
+
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        ident = {"1": ("a@x.com", "")}
+        switcher._usage_store.record(
+            {"1": FetchRecord(usage={"five_hour": {"pct": 10}})}, ident
+        )
+        with patch.object(
+            switcher._usage_store, "set_poll_plan", side_effect=OSError("disk full")
+        ), caplog.at_level(logging.WARNING, logger="claude-swap"):
+            switcher._replan_new_active("1", "a@x.com", "")
+        assert any(
+            "switch itself succeeded" in r.getMessage() for r in caplog.records
+        )
+
     def test_list_fetch_set_restricts_fetches(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, capsys
     ):

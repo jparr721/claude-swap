@@ -1951,6 +1951,34 @@ class ClaudeAccountSwitcher:
         if plans:
             self._usage_store.set_poll_plan(plans, identities)
 
+    def _replan_new_active(self, number: str, email: str, org_uuid: str) -> None:
+        """Pull the just-activated account's poll plan to the active floor.
+
+        Its stored plan was computed while it was an idle candidate and may
+        wait up to CANDIDATE_MAX_INTERVAL_S — too slow for the account whose
+        usage is about to move. The deadline anchors on the last measurement
+        (an already-old one comes due immediately, a never-measured account
+        is left plan-less so nothing blocks its first fetch), and the next
+        poll is only ever pulled earlier, never pushed later. Best-effort by
+        contract: the switch this rides on has already committed, so a cache
+        hiccup here must not surface as a switch failure."""
+        try:
+            identities = {number: (email, org_uuid or "")}
+            now = self._usage_store.clock()
+            entry = self._usage_store.entries(identities).get(number)
+            if entry is None or entry.fetched_at is None:
+                return
+            next_poll = max(now, entry.fetched_at + poll_policy.MIN_INTERVAL_S)
+            if entry.next_poll_at is not None and entry.next_poll_at <= next_poll:
+                return
+            self._usage_store.set_poll_plan(
+                {number: (next_poll, poll_policy.MIN_INTERVAL_S)}, identities
+            )
+        except Exception as e:
+            self._logger.warning(
+                f"Post-switch poll re-plan failed (switch itself succeeded): {e}"
+            )
+
     def _usage_by_account(self) -> dict[str, dict | str | None]:
         """Map account number → decision-grade usage value for managed accounts."""
         accounts_info = self._build_accounts_info()
@@ -3500,6 +3528,11 @@ class ClaudeAccountSwitcher:
                     print()
                     self._print_switch_followup()
                     print()
+                self._replan_new_active(
+                    target_account,
+                    target_email,
+                    data["accounts"][target_account].get("organizationUuid", ""),
+                )
                 return {"from": from_ref, "to": to_ref, "warnings": warnings_out}
 
             current_email, _ = current_identity
@@ -3714,6 +3747,11 @@ class ClaudeAccountSwitcher:
             print()
             self._print_switch_followup()
             print()
+        self._replan_new_active(
+            target_account,
+            target_email,
+            data["accounts"][target_account].get("organizationUuid", ""),
+        )
         return {"from": from_ref, "to": to_ref, "warnings": warnings_out}
 
     def _print_switch_followup(self) -> None:

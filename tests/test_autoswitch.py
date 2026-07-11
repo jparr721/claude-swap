@@ -642,6 +642,54 @@ class TestAdaptiveScheduler:
         self._tick(h, counts, usage)  # urgent plan due after only 60s
         assert counts["1"] == 3
 
+    def test_stale_candidate_plan_never_gates_the_active(
+        self, temp_home, monkeypatch
+    ):
+        # Role change outside a cswap switch (e.g. manual login): the active
+        # slot can carry a plan written while it was an idle candidate, up to
+        # 600s out. The ACTIVE_MAX_INTERVAL_S age cap overrides it.
+        h = self._harness(temp_home, monkeypatch, accounts=2)
+        usage = {"1": _usage(50), "2": _usage(20)}
+        counts: dict[str, int] = {}
+        self._tick(h, counts, usage)
+        h.switcher._usage_store.set_poll_plan(
+            {"1": (h.clock.now + 600.0, 600.0)}, {"1": ("a@example.com", "")}
+        )
+        h.clock.advance(240)  # inside the bogus plan, under the age cap
+        self._tick(h, counts, usage)
+        assert counts["1"] == 1
+        h.clock.advance(120)  # age 360 ≥ ACTIVE_MAX_INTERVAL_S
+        self._tick(h, counts, usage)
+        assert counts["1"] == 2
+
+    def test_exhausted_active_stays_parked_at_its_reset(
+        self, temp_home, monkeypatch
+    ):
+        from datetime import datetime, timezone
+
+        # The role-change age cap must not defeat reset parking: an exhausted
+        # account's numbers cannot move before the reset, so even a
+        # candidate-style slow interval leaves it parked (no candidates here,
+        # so escalation cannot refetch it either).
+        h = self._harness(temp_home, monkeypatch, accounts=1)
+        reset_ts = h.clock.now + 7200.0
+        reset_iso = (
+            datetime.fromtimestamp(reset_ts, tz=timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        usage = {"1": _usage(100, reset_iso)}
+        counts: dict[str, int] = {}
+        self._tick(h, counts, usage)
+        assert counts["1"] == 1  # measured once, parked at the reset
+        h.switcher._usage_store.set_poll_plan(
+            {"1": (reset_ts, 600.0)}, {"1": ("a@example.com", "")}
+        )
+        for _ in range(3):
+            h.clock.advance(400)  # well past the age cap each tick
+            self._tick(h, counts, usage)
+        assert counts["1"] == 1  # never re-fetched before the reset
+
     def test_band_jump_is_seen_at_most_one_poll_late(
         self, temp_home, monkeypatch
     ):
