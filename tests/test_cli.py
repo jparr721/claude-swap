@@ -1007,7 +1007,7 @@ class TestMapCommand:
         return switcher
 
     def test_map_account_to_path(self, temp_home, capsys):
-        from claude_swap.mappings import MappingStore, normalize_path
+        from claude_swap.mappings import MappingStore
         self._seeded_switcher_env(temp_home)
         target = temp_home / "proj"
         target.mkdir()

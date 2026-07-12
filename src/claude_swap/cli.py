@@ -263,14 +263,13 @@ Examples:
         switcher = ClaudeAccountSwitcher(debug=args.debug)
         _guard_root(switcher)
 
-        from claude_swap.mappings import MappingStore, normalize_path
-
-        store = MappingStore(switcher.backup_dir)
-
         if args.account is None:
             switcher.list_mappings()
             return
 
+        from claude_swap.mappings import MappingStore, normalize_path
+
+        store = MappingStore(switcher.backup_dir)
         account_num, email, org_uuid = switcher.resolve_account(args.account)
         target = args.path or os.getcwd()
         if not os.path.isdir(target):

@@ -123,33 +123,31 @@ cswap run 2 --share-history     # share your chat history with this account too
 
 Sessions use your normal `~/.claude` setup (settings, CLAUDE.md, skills, etc.), but each account keeps its own chat history. Pass `--share-history` if you want your accounts to continue the same conversations — a session started under one account shows up in `--resume` under the others, and nothing already saved is lost. Not supported on Windows yet.
 
+<details>
+<summary>Map accounts to directories — auto-pick per repo</summary>
+
+Bind a directory to an account, and a bare `cswap run` there launches that account in session mode — e.g. work account in work repos, personal elsewhere:
+
+```bash
+cswap map 2 ~/work/client-app   # map a directory to account 2
+cswap map user@example.com      # map the current directory
+cswap map                       # list mappings
+cswap unmap ~/work/client-app   # remove one (defaults to current directory)
+
+cd ~/work/client-app/src
+cswap run                       # → account 2, session mode
+```
+
+Subfolders inherit the nearest mapped ancestor. In an unmapped directory, `cswap run` just launches plain `claude` with your default login. Mappings are per-machine (not part of `cswap export`) and are cleaned up when their account is removed.
+
+</details>
+
 ### Interactive dashboard (TUI)
 
 Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usage for every account, switching, and the auto-switcher, all keyboard-driven. `cswap watch` opens it straight to the live monitor. Works on macOS, Linux, and Windows.
 
 <img src="assets/tui-watch.png" width="760" alt="cswap watch — live 5h/7d usage bars for every account, with reset times and the active account marked">
 
-
-### Use a specific account per directory (auto-select)
-
-Map an account to a repo/project directory, then launch with no account argument
-and claude-swap picks the mapped account automatically — in session mode, so
-different repos can run different accounts at the same time.
-
-~~~bash
-cswap map 2 ~/work/client-app        # map a path to account 2 (work)
-cswap map user@example.com           # map the CURRENT directory to an account
-cswap map                            # list all mappings
-cswap unmap ~/work/client-app        # remove a mapping (defaults to cwd)
-
-cd ~/work/client-app/src
-cswap run                            # no account → launches account 2 [session mode]
-~~~
-
-The nearest mapped ancestor directory wins, so subfolders inherit their parent's
-mapping. In an unmapped directory, `cswap run` (with no account) just launches
-Claude Code with your current default login. Mappings are stored locally per
-machine and are not included in `--export` / `--import`.
 
 ### Refresh expired tokens
 
@@ -165,10 +163,6 @@ This will update the stored credentials without creating a duplicate.
 
 ```bash
 cswap run 2                     # Run an account in this terminal only (session mode)
-cswap run                       # Run the current dir's mapped account (or default login if unmapped)
-cswap map 2 ~/work/app          # Map a directory to an account
-cswap map                       # List directory→account mappings
-cswap unmap ~/work/app          # Remove a directory mapping
 cswap auto                      # Auto-switch when nearing rate limits (see above)
 cswap config                    # Show or edit settings (see Configuration below)
 cswap list                      # Show all accounts with 5h/7d usage and reset times
