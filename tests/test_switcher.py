@@ -3757,12 +3757,38 @@ class TestSwitchSkipsBrokenSlots:
         data = s._get_sequence_data()
         assert data["activeAccountNumber"] == 2
 
+    def test_fresh_machine_skips_disabled_preferred_target(
+        self, temp_home: Path, capsys
+    ):
+        """No live session — a disabled recorded active slot stays out of rotation."""
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com")
+        s.set_account_disabled("1", True)
+        capsys.readouterr()
+
+        with patch.object(s, "list_accounts"):
+            s.switch()
+
+        assert "Skipping Account-1 (disabled)" in capsys.readouterr().out
+        assert s._get_sequence_data()["activeAccountNumber"] == 2
+
     def test_fresh_machine_all_broken_raises(self, temp_home: Path):
         s = self._setup(temp_home)
         self._seed(s, 1, "a@example.com", creds=False)
         self._seed(s, 2, "b@example.com", config=False)
 
         with pytest.raises(ConfigError, match="No managed accounts have valid"):
+            s.switch()
+
+    def test_fresh_machine_all_disabled_raises(self, temp_home: Path):
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com")
+        s.set_account_disabled("1", True)
+        s.set_account_disabled("2", True)
+
+        with pytest.raises(ConfigError, match="No accounts remain in rotation"):
             s.switch()
 
 

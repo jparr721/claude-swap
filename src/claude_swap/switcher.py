@@ -2910,23 +2910,40 @@ class ClaudeAccountSwitcher:
                 raise ConfigError("No accounts are managed yet")
 
             target = str(preferred)
-            if not self._account_is_switchable(target):
-                if json_output:
-                    warnings.append(
+            target_disabled = self._disabled_from_data(data, target)
+            if target_disabled or not self._account_is_switchable(target):
+                if target_disabled:
+                    message = f"Skipped Account-{target} (disabled)"
+                else:
+                    message = (
                         f"Skipped Account-{target} (no stored credentials/config)"
                     )
+                if json_output:
+                    warnings.append(message)
                 else:
-                    print(
-                        f"{accent('Skipping')} Account-{target} "
-                        f"(no stored credentials/config, re-add with "
-                        f"cswap --add-account --slot {target})"
-                    )
+                    if target_disabled:
+                        print(f"{accent('Skipping')} Account-{target} (disabled)")
+                    else:
+                        print(
+                            f"{accent('Skipping')} Account-{target} "
+                            f"(no stored credentials/config, re-add with "
+                            f"cswap --add-account --slot {target})"
+                        )
                 fallback = next(
                     (str(num) for num in sequence
-                     if str(num) != target and self._account_is_switchable(str(num))),
+                     if str(num) != target
+                     and not self._disabled_from_data(data, str(num))
+                     and self._account_is_switchable(str(num))),
                     None,
                 )
                 if not fallback:
+                    if any(
+                        self._account_is_switchable(str(num)) for num in sequence
+                    ):
+                        raise ConfigError(
+                            "No accounts remain in rotation. Re-enable one with: "
+                            "cswap enable <num|email>"
+                        )
                     raise ConfigError(
                         "No managed accounts have valid stored credentials/config. "
                         "Re-add a slot with: cswap --add-account --slot <number>"
