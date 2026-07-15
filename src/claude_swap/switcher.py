@@ -637,6 +637,134 @@ class ClaudeAccountSwitcher:
         ]
         return sorted(rows, key=lambda r: int(r[0]))
 
+    def swap_accounts(self, first: str, second: str) -> tuple[str, str]:
+        """Exchange two accounts' slot numbers (list order / numeric targets).
+
+        Everything keyed by the slot number moves with the swap: the
+        sequence records (including aliases, which belong to the account),
+        the per-slot credential and config backups, the rotation order in
+        ``sequence``, ``activeAccountNumber``, and each slot's session
+        profile directory (history preserved). Directory mappings key on
+        (email, org) and are unaffected. Usage-cache rows key on the slot
+        number but carry the account identity, so a swapped row fails the
+        identity check and self-heals on the next poll.
+
+        Returns the two resolved slot numbers ``(first_num, second_num)``.
+        """
+        if not self.sequence_file.exists():
+            raise ConfigError("No accounts are managed yet")
+
+        self._get_sequence_data_migrated()
+
+        num_a = self._resolve_account_identifier(first)
+        if not num_a:
+            raise AccountNotFoundError(f"No account found with identifier: {first}")
+        num_b = self._resolve_account_identifier(second)
+        if not num_b:
+            raise AccountNotFoundError(f"No account found with identifier: {second}")
+        if num_a == num_b:
+            raise ValidationError("Cannot swap an account with itself")
+
+        data = self._get_sequence_data()
+        record_a = (data or {}).get("accounts", {}).get(num_a)
+        record_b = (data or {}).get("accounts", {}).get(num_b)
+        if not record_a:
+            raise AccountNotFoundError(f"Account-{num_a} does not exist")
+        if not record_b:
+            raise AccountNotFoundError(f"Account-{num_b} does not exist")
+
+        email_a = record_a.get("email", "")
+        email_b = record_b.get("email", "")
+
+        # Backups and session profiles are keyed by (slot, email); relocating
+        # them under a live session-mode claude would pull state out from
+        # under a running process.
+        self._ensure_no_live_session(num_a, email_a, "--swap-accounts")
+        self._ensure_no_live_session(num_b, email_b, "--swap-accounts")
+
+        # Read both slots' backup material up front so a read failure aborts
+        # before anything has been moved. Missing material reads as "" (an
+        # api-key or never-backed-up slot) and stays missing after the swap.
+        creds_a = self._read_account_credentials(num_a, email_a)
+        creds_b = self._read_account_credentials(num_b, email_b)
+        config_a = self._read_account_config(num_a, email_a)
+        config_b = self._read_account_config(num_b, email_b)
+
+        # Move each session profile to its owner's new slot key. When both
+        # accounts share an email the two paths swap directly, so stage the
+        # first through a temporary name.
+        self._swap_session_dirs(num_a, email_a, num_b, email_b)
+
+        # Write under the new keys, then clear the old ones. When the emails
+        # match, the "old" keys are exactly the keys just written, so there
+        # is nothing stale to delete.
+        if creds_a:
+            self._write_account_credentials(num_b, email_a, creds_a)
+        if config_a:
+            self._write_account_config(num_b, email_a, config_a)
+        if creds_b:
+            self._write_account_credentials(num_a, email_b, creds_b)
+        if config_b:
+            self._write_account_config(num_a, email_b, config_b)
+        if email_a != email_b:
+            self._delete_account_files(num_a, email_a)
+            self._delete_account_files(num_b, email_b)
+
+        data["accounts"][num_a], data["accounts"][num_b] = record_b, record_a
+        int_a, int_b = int(num_a), int(num_b)
+        data["sequence"] = [
+            int_b if n == int_a else int_a if n == int_b else n
+            for n in data.get("sequence", [])
+        ]
+        active = data.get("activeAccountNumber")
+        if active == int_a:
+            data["activeAccountNumber"] = int_b
+        elif active == int_b:
+            data["activeAccountNumber"] = int_a
+        data["lastUpdated"] = get_timestamp()
+        self._write_json(self.sequence_file, data)
+
+        self._logger.info(
+            f"Swapped slots: {num_a} ({email_a}) <-> {num_b} ({email_b})"
+        )
+        return num_a, num_b
+
+    def _swap_session_dirs(
+        self, num_a: str, email_a: str, num_b: str, email_b: str
+    ) -> None:
+        """Exchange two slots' session profile directories, best effort.
+
+        A profile that cannot be moved is left behind rather than deleted:
+        setup_session re-bootstraps a missing profile from the (relocated)
+        backups, so the only cost of a skipped move is that slot's session
+        history.
+        """
+        dir_a = self._session_dir(num_a, email_a)
+        dir_b = self._session_dir(num_b, email_b)
+        new_a = self._session_dir(num_b, email_a)  # account A's new home
+        new_b = self._session_dir(num_a, email_b)  # account B's new home
+
+        staging = None
+        try:
+            if dir_a.exists():
+                staging = dir_a.with_name(dir_a.name + ".swapping")
+                os.replace(dir_a, staging)
+            if dir_b.exists() and not new_b.exists():
+                os.replace(dir_b, new_b)
+            if staging is not None and not new_a.exists():
+                os.replace(staging, new_a)
+                staging = None
+        except OSError as e:
+            self._logger.warning(f"Session profile move skipped during swap: {e}")
+        finally:
+            if staging is not None:
+                # Never strand a profile under the staging name.
+                try:
+                    if not dir_a.exists():
+                        os.replace(staging, dir_a)
+                except OSError:
+                    pass
+
     def slot_for_directory(self, directory: str | Path) -> tuple[str | None, str | None]:
         """Resolve a directory to its mapped account slot, for `cswap run`.
 

@@ -186,6 +186,7 @@ cswap enable 2                  # Return a disabled account to rotation
 cswap alias 2 dev               # Give an account a short alias (usable anywhere NUM|EMAIL is)
 cswap alias 2 --unset           # Remove an account's alias
 cswap alias                     # List all aliases
+cswap swap 1 2                  # Exchange two accounts' slot numbers (list order)
 cswap tui                       # Interactive dashboard (also: bare `cswap`)
 cswap watch                     # Dashboard, opened on the live watch page
 cswap upgrade                   # Upgrade claude-swap to the latest version
