@@ -546,7 +546,7 @@ class TestFetchAccountUsageSessionProfile:
     """
 
     def _info(self, backup_creds: str) -> tuple:
-        return (2, "test@example.com", "Org", "org-uuid", False, backup_creds)
+        return (2, "test@example.com", "Org", "org-uuid", False, backup_creds, "")
 
     def test_fresh_session_credentials_fetch_read_only(self, temp_home: Path):
         """Profile creds are used with is_active=True (no refresh, no persist)."""
@@ -814,19 +814,21 @@ class TestListAccountsUsage:
     ):
         """Entries older than the serve TTL are refetched, not served."""
         import time as time_mod
+        from claude_swap.poll_policy import SERVE_TTL_S
 
         sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
         active_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-active"}})
-        backup_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-backup"}})
+        backup_creds = active_creds
 
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
         switcher._write_json(switcher.sequence_file, sample_sequence_data)
 
-        # Store has a 100s-old entry for account "1" (past SERVE_TTL_S) and
+        # Store has an entry older than SERVE_TTL_S for account "1" and
         # nothing for "2" — both must be fetched live.
         backdated = UsageStore(
-            switcher.backup_dir / "cache", clock=lambda: time_mod.time() - 100
+            switcher.backup_dir / "cache",
+            clock=lambda: time_mod.time() - SERVE_TTL_S - 1,
         )
         backdated.record(
             {"1": FetchRecord(usage={"five_hour": {"pct": 25}})},
@@ -890,6 +892,7 @@ class TestActiveAccountRefresh:
             return oauth.UsageOutcome(usage_result)
 
         with patch.object(switcher, "_read_credentials", return_value=self._EXPIRED), \
+             patch.object(switcher, "_read_account_credentials", return_value=self._EXPIRED), \
              patch.object(switcher, "_active_cc_running", return_value=False), \
              patch.object(switcher, "_live_session_pids", return_value=[]), \
              patch.object(switcher, "_write_credentials") as write_live, \
@@ -959,6 +962,7 @@ class TestActiveAccountRefresh:
             return oauth.UsageOutcome(usage_result)  # in-memory token would fetch fine...
 
         with patch.object(switcher, "_read_credentials", return_value=live_changed), \
+             patch.object(switcher, "_read_account_credentials", return_value=self._EXPIRED), \
              patch.object(switcher, "_active_cc_running", return_value=False), \
              patch.object(switcher, "_live_session_pids", return_value=[]), \
              patch.object(switcher, "_write_credentials") as write_live, \
@@ -989,6 +993,7 @@ class TestActiveAccountRefresh:
             return oauth.UsageOutcome(usage_result)  # refreshed in-memory token still fetches fine
 
         with patch.object(switcher, "_read_credentials", return_value=self._EXPIRED), \
+             patch.object(switcher, "_read_account_credentials", return_value=self._EXPIRED), \
              patch.object(switcher, "_active_cc_running", return_value=False), \
              patch.object(switcher, "_live_session_pids", return_value=[]), \
              patch.object(switcher, "_write_credentials", side_effect=OSError("disk full")), \
@@ -1039,6 +1044,7 @@ class TestActiveAccountRefresh:
             return oauth.UsageOutcome({"five_hour": {"pct": 10}})
 
         with patch.object(switcher, "_read_credentials", return_value=self._EXPIRED), \
+             patch.object(switcher, "_read_account_credentials", return_value=self._EXPIRED), \
              patch.object(switcher, "_active_cc_running", return_value=False), \
              patch.object(switcher, "_live_session_pids", return_value=[]), \
              patch.object(switcher, "_write_credentials"), \
@@ -1089,7 +1095,7 @@ class TestActiveAccountRefresh:
             {"1": FetchRecord(usage={"five_hour": {"pct": 25.0}})},
             {"1": ("test@example.com", "")},
         )
-        info = (1, "test@example.com", "", "", True, self._EXPIRED)
+        info = (1, "test@example.com", "", "", True, self._EXPIRED, "")
 
         with patch.object(switcher, "_active_cc_running", return_value=True), \
              patch.object(switcher, "_live_session_pids", return_value=[]), \
@@ -1733,7 +1739,7 @@ class TestSwitchToSelfSlotAndForce:
         assert live["creds"] == self.LIVE_1
         out = capsys.readouterr().out
         assert "Already on" in out and "Account-1" in out
-        assert "cswap claude default switch --to 1 --force" in out
+        assert "cswap claude switch --to 1 --force" in out
 
     def test_force_self_activation_restores_imported_creds(
         self,
@@ -1920,7 +1926,7 @@ class TestDeadTokenQuarantine:
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
         self._make_dead(switcher)
-        info = [(2, "test@example.com", "Org", "", False, self._dead_creds())]
+        info = [(2, "test@example.com", "Org", "", False, self._dead_creds(), "")]
 
         with patch("claude_swap.oauth.try_fetch_usage_for_account") as fetch:
             entries = switcher._collect_usage_entries(info)
@@ -1936,7 +1942,7 @@ class TestDeadTokenQuarantine:
         from claude_swap.usage_store import FetchRecord
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
-        info = [(2, "test@example.com", "Org", "", False, self._dead_creds())]
+        info = [(2, "test@example.com", "Org", "", False, self._dead_creds(), "")]
 
         with patch.object(
             switcher, "_run_usage_fetches",
@@ -3574,7 +3580,7 @@ class TestMacosKeychainFallback:
         assert s._keychain_disabled_until > before  # a re-probe is scheduled
 
     def test_keychain_recovers_after_cooldown(self, temp_home: Path):
-        # A long-running daemon (menu bar / TUI) must re-probe after the cooldown
+        # A long-running process must re-probe after the cooldown
         # so a transient `security` timeout doesn't disable the Keychain for the
         # whole process — the stuck-in-file-mode "no credentials" display bug.
         s = self._macos_switcher()

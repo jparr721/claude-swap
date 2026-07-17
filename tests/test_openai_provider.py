@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import email.message
 import io
 import json
 import urllib.error
@@ -10,14 +9,12 @@ from pathlib import Path
 import pytest
 
 from claude_swap.providers import openai as openai_module
-from claude_swap.providers.frontends import CodexFrontend, OpencodeFrontend
+from claude_swap.providers.frontends import CodexFrontend
 from claude_swap.providers.openai import (
     ACCESS_TOKEN_EXPIRY_BUFFER_S,
     CODEX_OAUTH_CLIENT_ID,
     CODEX_REFRESH_TOKEN_URL,
     CodexOpenAIBackend,
-    OpencodeOpenAIBackend,
-    UsageFetchError,
 )
 from claude_swap.providers.types import RefreshResult
 
@@ -33,31 +30,10 @@ def _codex_auth(account_id: str) -> dict[str, object]:
     }
 
 
-def _opencode_auth(account_id: str) -> dict[str, object]:
-    return {
-        "openai": {
-            "type": "oauth",
-            "access": f"access-{account_id}",
-            "refresh": f"refresh-{account_id}",
-            "expires": 1784223299464,
-            "accountId": account_id,
-        }
-    }
-
-
 def test_codex_frontend_uses_codex_auth_path(temp_home: Path) -> None:
     frontend = CodexFrontend()
 
     assert frontend.active_auth_path() == temp_home / ".codex" / "auth.json"
-
-
-def test_opencode_frontend_uses_opencode_auth_path(temp_home: Path) -> None:
-    frontend = OpencodeFrontend()
-
-    assert (
-        frontend.active_auth_path()
-        == temp_home / ".local" / "share" / "opencode" / "auth.json"
-    )
 
 
 def test_codex_openai_metadata_reads_tokens() -> None:
@@ -67,33 +43,6 @@ def test_codex_openai_metadata_reads_tokens() -> None:
     assert metadata.auth_mode == "chatgpt"
     assert metadata.access_token == "access-acct-1"
     assert metadata.fingerprint
-
-
-def test_opencode_openai_metadata_reads_openai_entry() -> None:
-    metadata = OpencodeOpenAIBackend().metadata_from_text(
-        json.dumps(_opencode_auth("acct-1"))
-    )
-
-    assert metadata.account_id == "acct-1"
-    assert metadata.auth_mode == "oauth"
-    assert metadata.access_token == "access-acct-1"
-    assert metadata.fingerprint
-
-
-def test_opencode_openai_usage_401_is_expired(monkeypatch: pytest.MonkeyPatch) -> None:
-    headers = email.message.Message()
-    exc = urllib.error.HTTPError("https://chatgpt.com/x", 401, "err", headers, None)
-
-    def fake_urlopen(request, timeout):
-        raise exc
-
-    monkeypatch.setattr("claude_swap.providers.openai.urllib.request.urlopen", fake_urlopen)
-
-    result = OpencodeOpenAIBackend().fetch_usage(
-        json.dumps(_opencode_auth("acct-1")), timeout_s=3.0
-    )
-
-    assert result == UsageFetchError("token expired", None)
 
 
 def _jwt_with_exp(exp: object) -> str:
@@ -159,12 +108,6 @@ def test_api_key_only_auth_is_never_expired() -> None:
 def test_invalid_json_auth_is_never_expired() -> None:
     backend = CodexOpenAIBackend()
     assert backend.access_token_expired("{not json") is False
-
-
-def test_opencode_access_token_never_expired() -> None:
-    backend = OpencodeOpenAIBackend()
-    text = json.dumps({"openai": {"access": _jwt_with_exp(1_000_000_000), "refresh": "r"}})
-    assert backend.access_token_expired(text) is False
 
 
 class _FakeResponse:
@@ -303,11 +246,3 @@ def test_refresh_auth_api_key_only_auth() -> None:
     backend = CodexOpenAIBackend()
     text = json.dumps({"openai_api_key": "sk-x"})
     assert backend.refresh_auth(text, 10.0).error == "no_refresh_token"
-
-
-def test_opencode_refresh_auth_is_inert() -> None:
-    backend = OpencodeOpenAIBackend()
-    text = json.dumps({"openai": {"access": "a", "refresh": "r"}})
-    assert backend.refresh_auth(text, 10.0) == RefreshResult(
-        None, "no_refresh_token"
-    )

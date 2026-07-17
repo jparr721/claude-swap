@@ -82,7 +82,6 @@ class ProviderDefinition:
     backend: BackendAdapter
     state_dir: Path
     default_label_prefix: str
-    switch_mode: str
 
     @property
     def display_name(self) -> str:

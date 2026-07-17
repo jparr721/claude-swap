@@ -74,7 +74,7 @@ def _make_fake_keyring() -> types.ModuleType:
 def _isolate_real_home(request, tmp_path_factory, monkeypatch):
     """Safety net: no test may read or write the developer's real ``$HOME``.
 
-    Some tests (CLI/TUI argument tests that call ``main()``, etc.) construct a real
+    Some CLI argument tests that call ``main()`` construct a real
     ``ClaudeAccountSwitcher`` without the ``temp_home`` fixture. Without isolation
     that switcher resolves to the real ``~/.claude-swap-backup`` — writing logs,
     running data migrations, and reading the real account list. Redirect ``$HOME``
@@ -87,8 +87,7 @@ def _isolate_real_home(request, tmp_path_factory, monkeypatch):
     ``~/Library/Keychains``. An isolated ``$HOME`` makes those commands fail. The
     fixture itself swaps the default keychain to a throwaway one and restores it.
 
-    Always neutralize ``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``, ``OPENCODE_DATA_HOME``,
-    and ``XDG_DATA_HOME``
+    Always neutralize ``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``, and ``XDG_DATA_HOME``
     (even for ``temp_home`` tests): these vars bypass ``$HOME`` in path resolution
     (``paths.get_global_config_path``/``get_codex_auth_path``/``get_backup_root``),
     so a developer with any exported could otherwise have tests read/write real
@@ -97,7 +96,6 @@ def _isolate_real_home(request, tmp_path_factory, monkeypatch):
     """
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_DATA_HOME", raising=False)
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     if "temp_home" in request.fixturenames:
         return  # temp_home provides its own isolated home
@@ -276,3 +274,10 @@ def sample_sequence_data_with_org():
             },
         },
     }
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_poll_jitter(monkeypatch):
+    """Zero the poll-plan jitter so cadence tests are clock-exact; the jitter
+    itself is exercised in test_poll_policy via an injected rng."""
+    monkeypatch.setattr("claude_swap.poll_policy.JITTER_FRAC", 0.0)
