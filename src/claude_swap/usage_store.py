@@ -218,9 +218,11 @@ def due_candidate(
 
 
 def _failure_backoff_s(consecutive_failures: int, retry_after_s: float | None) -> float:
-    computed = min(
-        BACKOFF_BASE_S * (2 ** max(0, consecutive_failures - 1)), BACKOFF_CAP_S
-    )
+    computed = BACKOFF_BASE_S
+    remaining_doublings = max(0, consecutive_failures - 1)
+    while remaining_doublings > 0 and computed < BACKOFF_CAP_S:
+        computed = min(computed * 2, BACKOFF_CAP_S)
+        remaining_doublings -= 1
     if retry_after_s is None:
         return computed
     if retry_after_s == 0:

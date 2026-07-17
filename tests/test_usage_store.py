@@ -179,6 +179,9 @@ class TestBackoff:
     def test_backoff_cap(self):
         assert usage_store._failure_backoff_s(50, None) == BACKOFF_CAP_S
 
+    def test_backoff_cap_does_not_overflow_for_many_failures(self):
+        assert usage_store._failure_backoff_s(1025, None) == BACKOFF_CAP_S
+
     def test_retry_after_is_the_floor(self, store, clock):
         store.record(
             {"1": FetchRecord(error="http-429", retry_after_s=90.0)}, IDENT
