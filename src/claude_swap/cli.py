@@ -218,7 +218,7 @@ def _run_upgrade() -> None:
 
 @app.command("upgrade")
 def upgrade_command() -> None:
-    """Self-upgrade claude-swap to the latest release."""
+    """Report that self-upgrade is disabled for this distribution."""
     _run_upgrade()
 
 

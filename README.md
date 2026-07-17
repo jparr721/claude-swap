@@ -21,7 +21,7 @@ pipx install claude-swap
 ### From source
 
 ```bash
-git clone https://github.com/realiti4/claude-swap.git
+git clone https://github.com/jparr721/claude-swap.git
 cd claude-swap
 uv sync
 uv run cswap --help
@@ -29,12 +29,7 @@ uv run cswap --help
 
 ### Updating
 
-```bash
-cswap upgrade          # uv/pipx installs on macOS/Linux: auto-detects and upgrades
-# or run your installer directly:
-uv tool upgrade claude-swap
-pipx upgrade claude-swap
-```
+`cswap upgrade` is disabled for this distribution. Update it from the source you installed from.
 
 ## Usage
 
@@ -179,7 +174,6 @@ This will update the stored credentials without creating a duplicate.
 ```bash
 cswap ls                                  # overview across all providers
 cswap config [list|get|set|unset|path]    # settings
-cswap upgrade                             # self-upgrade (alias: update)
 cswap purge                               # remove all claude-swap data
 
 cswap claude list|status|add|add-token|switch|remove|run|auto|export|import
