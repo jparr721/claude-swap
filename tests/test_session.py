@@ -926,7 +926,7 @@ class TestGuards:
     def test_list_skips_refresh_for_live_session_accounts(
         self, seeded_switcher, monkeypatch
     ):
-        """cswap claude default list must not proactively refresh an account that is live in
+        """cswap claude list must not proactively refresh an account that is live in
         a session — rotating the backup copy's token could invalidate the
         session's copy."""
         session_dir = session_dir_for(

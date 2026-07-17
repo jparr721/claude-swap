@@ -24,8 +24,6 @@ from claude_swap.paths import (
     get_credentials_path,
     get_global_config_path,
     get_legacy_backup_root,
-    get_opencode_auth_path,
-    get_opencode_data_home,
     get_provider_store_root,
     migrate_legacy_backup_dir,
 )
@@ -38,7 +36,6 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     home.mkdir()
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_DATA_HOME", raising=False)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
     with patch("pathlib.Path.home", return_value=home):
@@ -120,23 +117,6 @@ class TestGetCodexHome:
 class TestGetCodexAuthPath:
     def test_auth_json_inside_codex_home(self, isolated_home: Path):
         assert get_codex_auth_path() == isolated_home / ".codex" / "auth.json"
-
-
-class TestGetOpencodeAuthPath:
-    def test_default_is_xdg_data_home_opencode(self, isolated_home: Path):
-        assert get_opencode_data_home() == isolated_home / ".local" / "share" / "opencode"
-        assert (
-            get_opencode_auth_path()
-            == isolated_home / ".local" / "share" / "opencode" / "auth.json"
-        )
-
-    def test_respects_opencode_data_home(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        custom = tmp_path / "opencode-data"
-        monkeypatch.setenv("OPENCODE_DATA_HOME", str(custom))
-        assert get_opencode_data_home() == custom
-        assert get_opencode_auth_path() == custom / "auth.json"
 
 
 class TestProviderStoreRoot:

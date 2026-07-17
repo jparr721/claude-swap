@@ -106,7 +106,7 @@ def test_claude_table_sentinel_and_last_seen() -> None:
     )
     text = _rendered(render.claude_accounts_table(ClaudeListData(False, [row])))
     assert "re-login needed" in text
-    assert "cswap claude default add" in text
+    assert "cswap claude add" in text
     assert "last seen" in text
 
 
@@ -158,12 +158,12 @@ def test_provider_table_plan_column_and_relogin_hint() -> None:
     ]
     text = _rendered(
         render.provider_accounts_table(
-            "Codex / OpenAI", rows, "re-login needed - re-add with: cswap codex openai add"
+            "Codex / OpenAI", rows, "re-login needed - re-add with: cswap codex add"
         )
     )
     assert "Codex / OpenAI" in text
     assert "jarred" in text and "42%" in text and "pro" in text
-    assert "cswap codex openai add" in text
+    assert "cswap codex add" in text
     assert "-" in text  # empty plan placeholder on the sentinel row
 
 

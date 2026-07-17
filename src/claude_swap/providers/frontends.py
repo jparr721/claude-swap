@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from claude_swap.paths import get_codex_auth_path, get_opencode_auth_path
+from claude_swap.paths import get_codex_auth_path
 from claude_swap.providers.types import ProviderRef
 
 
@@ -18,15 +18,3 @@ class CodexFrontend:
 
     def headless_login_argv(self) -> list[str] | None:
         return ["codex", "login", "--device-auth"]
-
-
-class OpencodeFrontend:
-    provider_ref = ProviderRef("opencode", "openai")
-    display_name = "opencode"
-    login_command = "opencode auth login"
-
-    def active_auth_path(self) -> Path:
-        return get_opencode_auth_path()
-
-    def headless_login_argv(self) -> list[str] | None:
-        return None

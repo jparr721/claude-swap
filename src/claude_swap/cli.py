@@ -20,7 +20,6 @@ from claude_swap.process_detection import get_running_instances
 from claude_swap.providers.registry import (
     get_provider,
     managed_aggregate_providers,
-    provider_definitions,
 )
 from claude_swap.providers.store import ProviderAccountStore
 from claude_swap.providers.types import ProviderAccountRow
@@ -124,7 +123,7 @@ def _render_claude_accounts(switcher: ClaudeAccountSwitcher, token_status: bool)
 
 def _provider_relogin_hint(provider_store: ProviderAccountStore) -> str:
     ref = provider_store.definition.ref
-    return f"re-login needed - re-add with: cswap {ref.frontend} {ref.backend} add"
+    return f"re-login needed - re-add with: cswap {ref.frontend} add"
 
 
 def _fetch_provider_rows(provider_store: ProviderAccountStore) -> list[ProviderAccountRow]:
@@ -411,12 +410,8 @@ def config_path(
     _dispatch(action, json_mode=False, update_check=False)
 
 
-claude_app = typer.Typer(no_args_is_help=True, help="Claude Code frontend")
-claude_default_app = typer.Typer(
-    no_args_is_help=True, help="Claude Code accounts (default backend)"
-)
+claude_app = typer.Typer(no_args_is_help=True, help="Claude Code accounts (Anthropic)")
 app.add_typer(claude_app, name="claude")
-claude_app.add_typer(claude_default_app, name="default")
 
 
 class SwitchStrategy(str, Enum):
@@ -424,7 +419,7 @@ class SwitchStrategy(str, Enum):
     next_available = "next-available"
 
 
-@claude_default_app.command("list")
+@claude_app.command("list")
 def claude_list(
     json_output: bool = typer.Option(
         False, "--json", help="Emit machine-readable JSON to stdout"
@@ -450,7 +445,7 @@ def claude_list(
     _dispatch(action, json_mode=json_output, update_check=True)
 
 
-@claude_default_app.command("status")
+@claude_app.command("status")
 def claude_status(
     json_output: bool = typer.Option(
         False, "--json", help="Emit machine-readable JSON to stdout"
@@ -469,7 +464,7 @@ def claude_status(
     _dispatch(action, json_mode=json_output, update_check=True)
 
 
-@claude_default_app.command("add")
+@claude_app.command("add")
 def claude_add(
     slot: int | None = typer.Option(
         None, "--slot", metavar="NUM", help="Store in a specific slot"
@@ -484,7 +479,7 @@ def claude_add(
     )
 
 
-@claude_default_app.command("add-token")
+@claude_app.command("add-token")
 def claude_add_token(
     token: str = typer.Argument(
         "", metavar="[TOKEN|-]", help="Setup token or API key ('-' or empty reads stdin/prompt)"
@@ -510,7 +505,7 @@ def claude_add_token(
     )
 
 
-@claude_default_app.command("switch")
+@claude_app.command("switch")
 def claude_switch(
     target: str | None = typer.Argument(None, metavar="[NUM|EMAIL]"),
     to: str | None = typer.Option(None, "--to", metavar="NUM|EMAIL", help="Switch target"),
@@ -556,14 +551,14 @@ def claude_switch(
             except Exception:
                 _logger.debug("post-switch account render failed", exc_info=True)
                 render.console.print(
-                    "usage display unavailable - run: cswap claude default list", style="dim"
+                    "usage display unavailable - run: cswap claude list", style="dim"
                 )
         return result
 
     _dispatch(action, json_mode=json_output, update_check=True)
 
 
-@claude_default_app.command("remove")
+@claude_app.command("remove")
 def claude_remove(
     identifier: str = typer.Argument(..., metavar="NUM|EMAIL"),
     debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
@@ -576,7 +571,7 @@ def claude_remove(
     )
 
 
-@claude_default_app.command("export")
+@claude_app.command("export")
 def claude_export(
     destination: str = typer.Argument(..., metavar="PATH|-"),
     account: str | None = typer.Option(
@@ -597,7 +592,7 @@ def claude_export(
     _dispatch(action, json_mode=False, update_check=True)
 
 
-@claude_default_app.command("import")
+@claude_app.command("import")
 def claude_import(
     source: str = typer.Argument(..., metavar="PATH|-"),
     force: bool = typer.Option(False, "--force", help="Overwrite existing accounts"),
@@ -613,7 +608,7 @@ def claude_import(
     _dispatch(action, json_mode=False, update_check=True)
 
 
-@claude_default_app.command("run")
+@claude_app.command("run")
 def claude_run(
     account: str = typer.Argument(..., metavar="NUM|EMAIL", help="Account to run"),
     claude_args: list[str] | None = typer.Argument(
@@ -658,7 +653,7 @@ def claude_run(
     _dispatch(action, json_mode=False, update_check=False)
 
 
-@claude_default_app.command("auto")
+@claude_app.command("auto")
 def claude_auto(
     once: bool = typer.Option(
         False, "--once", help="Evaluate once, maybe switch, and exit (exit code = outcome)"
@@ -758,132 +753,112 @@ def claude_auto(
         raise typer.Exit(130) from None
 
 
-def _build_backend_app(frontend: str, backend: str, display_name: str) -> typer.Typer:
-    """Verb commands for one (frontend, backend) provider, wired to its store."""
-    backend_app = typer.Typer(
-        no_args_is_help=True, help=f"Manage {display_name} accounts"
+codex_app = typer.Typer(no_args_is_help=True, help="Codex accounts (OpenAI)")
+app.add_typer(codex_app, name="codex")
+
+
+def _codex_store() -> ProviderAccountStore:
+    try:
+        return get_provider("codex", "openai")
+    except KeyError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+@codex_app.command("list")
+def codex_list(
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON to stdout"
+    ),
+) -> None:
+    """List managed Codex accounts."""
+
+    def action() -> dict | None:
+        store = _codex_store()
+        if json_output:
+            return store.list_accounts()
+        rows = _fetch_provider_rows(store)
+        if rows:
+            render.console.print(
+                render.provider_accounts_table(
+                    store.definition.display_name,
+                    rows,
+                    _provider_relogin_hint(store),
+                )
+            )
+        else:
+            render.console.print(
+                f"No {store.definition.display_name} accounts are managed yet.",
+                style="dim",
+            )
+        return None
+
+    _dispatch(action, json_mode=json_output, update_check=False)
+
+
+@codex_app.command("status")
+def codex_status(
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON to stdout"
+    ),
+) -> None:
+    """Show the active Codex account."""
+
+    def action() -> dict | None:
+        store = _codex_store()
+        if json_output:
+            return store.status()
+        render.provider_status(store.definition.display_name, store.status())
+        return None
+
+    _dispatch(action, json_mode=json_output, update_check=False)
+
+
+@codex_app.command("add")
+def codex_add(
+    label: str | None = typer.Option(
+        None, "--label", metavar="LABEL", help="Display label for the account"
+    ),
+    slot: int | None = typer.Option(
+        None, "--slot", metavar="NUM", help="Store in a specific slot"
+    ),
+) -> None:
+    """Add or refresh a Codex account via device login."""
+    _dispatch(
+        lambda: _codex_store().add_account(label=label, slot=slot),
+        json_mode=False,
+        update_check=False,
     )
 
-    def _store() -> ProviderAccountStore:
-        try:
-            return get_provider(frontend, backend)
-        except KeyError as exc:
-            # Unreachable through the generated tree; guard for direct callers.
-            raise ConfigError(str(exc)) from exc
 
-    @backend_app.command("list")
-    def provider_list(
-        json_output: bool = typer.Option(
-            False, "--json", help="Emit machine-readable JSON to stdout"
-        ),
-    ) -> None:
-        """List managed accounts."""
-
-        def action() -> dict | None:
-            store = _store()
-            if json_output:
-                return store.list_accounts()
-            rows = _fetch_provider_rows(store)
-            if rows:
-                render.console.print(
-                    render.provider_accounts_table(
-                        store.definition.display_name,
-                        rows,
-                        _provider_relogin_hint(store),
-                    )
-                )
-            else:
-                render.console.print(
-                    f"No {store.definition.display_name} accounts are managed yet.",
-                    style="dim",
-                )
-            return None
-
-        _dispatch(action, json_mode=json_output, update_check=False)
-
-    @backend_app.command("status")
-    def provider_status(
-        json_output: bool = typer.Option(
-            False, "--json", help="Emit machine-readable JSON to stdout"
-        ),
-    ) -> None:
-        """Show the active account."""
-
-        def action() -> dict | None:
-            store = _store()
-            if json_output:
-                return store.status()
-            render.provider_status(store.definition.display_name, store.status())
-            return None
-
-        _dispatch(action, json_mode=json_output, update_check=False)
-
-    @backend_app.command("add")
-    def provider_add(
-        label: str | None = typer.Option(
-            None, "--label", metavar="LABEL", help="Display label for the account"
-        ),
-        slot: int | None = typer.Option(
-            None, "--slot", metavar="NUM", help="Store in a specific slot"
-        ),
-    ) -> None:
-        """Add or refresh an account (drives the frontend's login flow)."""
-        _dispatch(
-            lambda: _store().add_account(label=label, slot=slot),
-            json_mode=False,
-            update_check=False,
-        )
-
-    @backend_app.command("switch")
-    def provider_switch(
-        target: str | None = typer.Argument(None, metavar="[NUM|LABEL]"),
-        to: str | None = typer.Option(None, "--to", metavar="NUM|LABEL", help="Switch target"),
-        json_output: bool = typer.Option(
-            False, "--json", help="Emit machine-readable JSON to stdout"
-        ),
-    ) -> None:
-        """Rotate to the next account, or switch to a specific one."""
-        if target is not None and to is not None:
-            raise typer.BadParameter("give either a positional target or --to, not both")
-        resolved = target if target is not None else to
-        _dispatch(
-            lambda: _store().switch(resolved, json_output=json_output),
-            json_mode=json_output,
-            update_check=False,
-        )
-
-    @backend_app.command("remove")
-    def provider_remove(
-        identifier: str = typer.Argument(..., metavar="NUM|LABEL"),
-    ) -> None:
-        """Remove a managed account."""
-        _dispatch(
-            lambda: _store().remove_account(identifier),
-            json_mode=False,
-            update_check=False,
-        )
-
-    return backend_app
+@codex_app.command("switch")
+def codex_switch(
+    target: str | None = typer.Argument(None, metavar="[NUM|LABEL]"),
+    to: str | None = typer.Option(None, "--to", metavar="NUM|LABEL", help="Switch target"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON to stdout"
+    ),
+) -> None:
+    """Rotate to the next Codex account, or switch to a specific one."""
+    if target is not None and to is not None:
+        raise typer.BadParameter("give either a positional target or --to, not both")
+    resolved = target if target is not None else to
+    _dispatch(
+        lambda: _codex_store().switch(resolved, json_output=json_output),
+        json_mode=json_output,
+        update_check=False,
+    )
 
 
-def _register_provider_apps() -> None:
-    frontend_apps: dict[str, typer.Typer] = {}
-    for definition in provider_definitions():
-        frontend = definition.ref.frontend
-        backend = definition.ref.backend
-        if frontend not in frontend_apps:
-            frontend_apps[frontend] = typer.Typer(
-                no_args_is_help=True,
-                help=f"{definition.frontend.display_name} frontend",
-            )
-            app.add_typer(frontend_apps[frontend], name=frontend)
-        frontend_apps[frontend].add_typer(
-            _build_backend_app(frontend, backend, definition.display_name),
-            name=backend,
-        )
-
-
-_register_provider_apps()
+@codex_app.command("remove")
+def codex_remove(
+    identifier: str = typer.Argument(..., metavar="NUM|LABEL"),
+) -> None:
+    """Remove a managed Codex account."""
+    _dispatch(
+        lambda: _codex_store().remove_account(identifier),
+        json_mode=False,
+        update_check=False,
+    )
 
 
 def _prog_name() -> str:

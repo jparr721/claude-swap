@@ -2,7 +2,7 @@
 
 Moves the OAuth credentials and config across machines via a portable
 JSON envelope. No encryption is built in — users compose their own
-(e.g. `cswap claude default export - | gpg -c > out.gpg`).
+(e.g. `cswap claude export - | gpg -c > out.gpg`).
 """
 
 from __future__ import annotations
@@ -135,7 +135,7 @@ def export_accounts(
     """
     sequence_data = switcher._get_sequence_data_migrated()
     if not sequence_data or not sequence_data.get("accounts"):
-        raise TransferError("no accounts to export — run cswap claude default add first")
+        raise TransferError("no accounts to export — run cswap claude add first")
 
     accounts_map = sequence_data["accounts"]
 
@@ -192,7 +192,7 @@ def export_accounts(
                 _eprint(
                     f"Skipping Account-{num} ({email}): no stored "
                     f"credentials/config — re-add with: "
-                    f"cswap claude default add --slot {num}"
+                    f"cswap claude add --slot {num}"
                 )
                 continue
 
@@ -225,7 +225,7 @@ def export_accounts(
     if not accounts_payload:
         raise TransferError(
             "no exportable accounts — all managed slots are missing stored "
-            "credentials/config. Re-add with: cswap claude default add --slot <number>"
+            "credentials/config. Re-add with: cswap claude add --slot <number>"
         )
 
     # Only carry activeAccountNumber if that slot is actually present in the
@@ -300,7 +300,7 @@ def import_accounts(
     if envelope.get("encrypted") is True:
         raise TransferError(
             "encrypted exports are not supported in this version — "
-            "decrypt before piping (e.g. gpg -d backup.gpg | cswap claude default import -)"
+            "decrypt before piping (e.g. gpg -d backup.gpg | cswap claude import -)"
         )
 
     accounts = envelope.get("accounts")
@@ -413,7 +413,7 @@ def import_accounts(
                     f"Warning: {entry['email']} (slot {target_num}) has a live "
                     f"session-mode instance (PID {', '.join(map(str, live_pids))}); "
                     "its session profile keeps the pre-import credentials until "
-                    "it is restarted via 'cswap claude default run'."
+                    "it is restarted via 'cswap claude run'."
                 )
         else:
             if entry["exported_num"] not in data.get("accounts", {}):
@@ -487,5 +487,5 @@ def import_accounts(
         if live_slot is not None and live_slot in written_slots:
             _eprint(
                 f"Note: {identity[0]} is your current live login — activate the "
-                f"imported credentials with: cswap claude default switch --to {live_slot} --force"
+                f"imported credentials with: cswap claude switch --to {live_slot} --force"
             )

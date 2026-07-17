@@ -1,4 +1,4 @@
-"""Compatibility exports for Codex and opencode provider stores."""
+"""Compatibility exports for the Codex provider store."""
 
 from __future__ import annotations
 
@@ -21,26 +21,11 @@ def fetch_codex_usage(
     return store.definition.backend.fetch_usage(auth_text, timeout_s)
 
 
-def fetch_opencode_usage(
-    auth_text: str,
-    timeout_s: float,
-) -> dict[str, Any] | str | _UsageFetchError:
-    store = get_provider("opencode", "openai")
-    return store.definition.backend.fetch_usage(auth_text, timeout_s)
-
-
 def _codex_usage_fetch(
     auth_text: str,
     timeout_s: float,
 ) -> dict[str, Any] | str | _UsageFetchError:
     return fetch_codex_usage(auth_text, timeout_s)
-
-
-def _opencode_usage_fetch(
-    auth_text: str,
-    timeout_s: float,
-) -> dict[str, Any] | str | _UsageFetchError:
-    return fetch_opencode_usage(auth_text, timeout_s)
 
 
 def _codex_store() -> ProviderAccountStore:
@@ -49,23 +34,9 @@ def _codex_store() -> ProviderAccountStore:
     return store
 
 
-def _opencode_store() -> ProviderAccountStore:
-    store = get_provider("opencode", "openai")
-    store.definition.backend.fetch_usage = _opencode_usage_fetch  # type: ignore[method-assign]
-    return store
-
-
 class CodexAccountSwitcher:
     def __init__(self) -> None:
         self._store = _codex_store()
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._store, name)
-
-
-class OpencodeAccountSwitcher:
-    def __init__(self) -> None:
-        self._store = _opencode_store()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._store, name)

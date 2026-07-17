@@ -8,8 +8,8 @@ import pytest
 
 from claude_swap.exceptions import ConfigError
 from claude_swap.paths import get_backup_root, get_provider_store_root
-from claude_swap.providers.frontends import CodexFrontend, OpencodeFrontend
-from claude_swap.providers.openai import CodexOpenAIBackend, OpencodeOpenAIBackend
+from claude_swap.providers.frontends import CodexFrontend
+from claude_swap.providers.openai import CodexOpenAIBackend
 from claude_swap.providers.store import ProviderAccountStore
 from claude_swap.providers.types import ProviderDefinition, ProviderRef, RefreshResult
 
@@ -21,18 +21,6 @@ def _codex_auth(account_id: str) -> dict[str, object]:
             "account_id": account_id,
             "access_token": f"token-{account_id}",
         },
-    }
-
-
-def _opencode_auth(account_id: str) -> dict[str, object]:
-    return {
-        "openai": {
-            "type": "oauth",
-            "access": f"token-{account_id}",
-            "refresh": f"refresh-{account_id}",
-            "expires": 1784223299464,
-            "accountId": account_id,
-        }
     }
 
 
@@ -50,21 +38,6 @@ def _codex_store() -> ProviderAccountStore:
             backend=CodexOpenAIBackend(),
             state_dir=get_provider_store_root(ref.frontend, ref.backend),
             default_label_prefix="codex-openai-account",
-            switch_mode="symlink",
-        )
-    )
-
-
-def _opencode_store() -> ProviderAccountStore:
-    ref = ProviderRef("opencode", "openai")
-    return ProviderAccountStore(
-        ProviderDefinition(
-            ref=ref,
-            frontend=OpencodeFrontend(),
-            backend=OpencodeOpenAIBackend(),
-            state_dir=get_provider_store_root(ref.frontend, ref.backend),
-            default_label_prefix="opencode-openai-account",
-            switch_mode="snapshot-refused",
         )
     )
 
@@ -94,20 +67,6 @@ def test_codex_store_adds_and_lists_account(
     assert payload["accounts"][0]["active"] is True
 
 
-def test_opencode_store_refuses_to_restore_openai_oauth_snapshot(temp_home: Path) -> None:
-    auth_path = temp_home / ".local" / "share" / "opencode" / "auth.json"
-    _write(auth_path, _opencode_auth("acct-1"))
-    store = _opencode_store()
-    store.add_account(label="one", slot=1)
-    _write(auth_path, _opencode_auth("acct-2"))
-    store.add_account(label="two", slot=2)
-
-    with pytest.raises(ConfigError, match="cannot safely restore stored OpenAI OAuth"):
-        store.switch("1", json_output=False)
-
-    assert json.loads(auth_path.read_text(encoding="utf-8"))["openai"]["accountId"] == "acct-2"
-
-
 def test_codex_store_switches_by_symlink_rotation(temp_home: Path) -> None:
     store = _codex_store()
     store._setup_directories()
@@ -124,13 +83,6 @@ def test_codex_store_switches_by_symlink_rotation(temp_home: Path) -> None:
     assert result["switched"] is True
     assert result["to"]["number"] == 2
     assert store.auth_path.resolve() == store._auth_backup_path("2").resolve()
-
-
-def test_missing_active_auth_mentions_provider_login(temp_home: Path) -> None:
-    store = _opencode_store()
-
-    with pytest.raises(ConfigError, match="opencode auth"):
-        store.add_account(label=None, slot=None)
 
 
 def test_codex_provider_store_ignores_existing_codex_backup(temp_home: Path) -> None:
@@ -184,25 +136,6 @@ def test_provider_store_rejects_nonnumeric_account_keys(temp_home: Path) -> None
 
     with pytest.raises(ConfigError, match="state account keys must be numeric"):
         store.list_accounts()
-
-
-def test_openai_switch_refuses_before_stored_auth_lookup(temp_home: Path) -> None:
-    store = _opencode_store()
-    store.sequence_file.parent.mkdir(parents=True)
-    store.sequence_file.write_text(
-        json.dumps(
-            {
-                "activeAccountNumber": None,
-                "lastUpdated": "2026-07-08T00:00:00Z",
-                "sequence": [1],
-                "accounts": {"1": {"label": "work"}},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ConfigError, match="cannot safely restore stored OpenAI OAuth"):
-        store.switch("1", json_output=False)
 
 
 def test_activate_auth_symlink_points_active_at_target(temp_home: Path) -> None:
@@ -312,12 +245,6 @@ def test_codex_switch_to_missing_credential_tells_user_to_readd(temp_home: Path)
     store._write_json(store.sequence_file, data)  # registered but NO target file on disk
 
     with pytest.raises(ConfigError, match="add --slot 1"):
-        store.switch("1", json_output=False)
-
-
-def test_opencode_switch_still_refused(temp_home: Path) -> None:
-    store = _opencode_store()
-    with pytest.raises(ConfigError, match="cannot safely restore stored OpenAI OAuth"):
         store.switch("1", json_output=False)
 
 
@@ -729,26 +656,6 @@ def test_no_refresh_token_falls_through_to_plain_fetch(
     assert json.dumps(auth_no_refresh) in fetch_auths
 
 
-def test_opencode_accounts_never_hit_the_refresh_path(
-    temp_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    auth_path = temp_home / ".local" / "share" / "opencode" / "auth.json"
-    _write(auth_path, _opencode_auth("acct-1"))
-    store = _opencode_store()
-    store.add_account(label="one", slot=1)
-    fetch_calls: list[str] = []
-
-    def fake_fetch(auth_text: str, timeout_s: float) -> dict[str, object]:
-        fetch_calls.append(auth_text)
-        return {"windows": []}
-
-    monkeypatch.setattr(store.definition.backend, "fetch_usage", fake_fetch)
-
-    store.list_accounts()
-
-    assert len(fetch_calls) == 1  # fetched as today, no refresh interference
-
-
 def test_invalid_grant_quarantines_account_and_reports_relogin(
     temp_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -810,11 +717,11 @@ def test_relogin_needed_appears_in_human_output(
     # Force a wide render width so the warn-styled hint never wraps mid-command.
     monkeypatch.setenv("COLUMNS", "200")
 
-    result = CliRunner().invoke(app, ["codex", "openai", "list"])
+    result = CliRunner().invoke(app, ["codex", "list"])
 
     assert result.exit_code == 0, result.output
     assert "re-login needed" in result.output
-    assert "cswap codex openai add" in result.output
+    assert "cswap codex add" in result.output
 
 
 def test_materialize_active_auth_replaces_symlink_with_real_file(temp_home: Path) -> None:

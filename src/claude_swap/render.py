@@ -58,11 +58,11 @@ SENTINEL_NOTES = {
     # The hard line break before "then run:" keeps the actionable command on
     # its own short line: this note is long enough that Rich's word-wrap
     # point (which shifts with the neighboring Account column's width) can
-    # otherwise land mid-command, splitting "cswap claude default add"
+    # otherwise land mid-command, splitting "cswap claude add"
     # across two lines.
     USAGE_RELOGIN_REQUIRED: (
         "re-login needed - refresh token dead; log in with Claude Code,\n"
-        "then run: cswap claude default add"
+        "then run: cswap claude add"
     ),
 }
 

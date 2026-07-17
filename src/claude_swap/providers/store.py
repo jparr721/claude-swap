@@ -326,10 +326,9 @@ class ProviderAccountStore:
             return
         num = self._current_account_number(data, text)
         if num is None:
-            ref = self.definition.ref
             raise ConfigError(
                 f"The active {self.definition.display_name} auth is not a managed "
-                f"account. Add it first with: cswap {ref.frontend} {ref.backend} add"
+                f"account. Add it first with: cswap {self.definition.ref.frontend} add"
             )
         self._write_account_auth(num, text)
 
@@ -337,10 +336,9 @@ class ProviderAccountStore:
         try:
             return self._auth_backup_path(account_num).read_text(encoding="utf-8")
         except FileNotFoundError as exc:
-            ref = self.definition.ref
             raise ConfigError(
                 f"{self.definition.display_name} Account-{account_num} has no stored auth. "
-                f"Re-add it with: cswap {ref.frontend} {ref.backend} add --slot {account_num}"
+                f"Re-add it with: cswap {self.definition.ref.frontend} add --slot {account_num}"
             ) from exc
         except OSError as exc:
             raise ConfigError(
@@ -750,62 +748,7 @@ class ProviderAccountStore:
         )
 
     def add_account(self, label: str | None, slot: int | None) -> None:
-        if self.definition.switch_mode == "symlink":
-            self._add_account_via_login(label, slot)
-            return
-        active_auth = self._read_required_active_auth()
-        metadata = self._metadata(active_auth)
-        self._setup_directories()
-        self._init_sequence_file()
-
-        with FileLock(self.lock_file):
-            data = self._sequence_data()
-            existing_num = self._current_account_number(data, active_auth)
-            if slot is None:
-                account_num = existing_num or str(self._next_account_number(data))
-            else:
-                if slot < 1:
-                    raise ConfigError(
-                        f"{self.definition.display_name} slot number must be >= 1"
-                    )
-                account_num = str(slot)
-                if existing_num is not None and existing_num != account_num:
-                    raise ValidationError(
-                        f"This {self.definition.display_name} auth is already stored as "
-                        f"{self.definition.display_name} Account-{existing_num}"
-                    )
-                if (
-                    account_num in data.get("accounts", {})
-                    and existing_num != account_num
-                ):
-                    raise ConfigError(
-                        f"{self.definition.display_name} Account-{account_num} already exists. "
-                        f"Remove it first or choose another slot."
-                    )
-
-            existing_account = data.get("accounts", {}).get(account_num, {})
-            if label is None and existing_account:
-                resolved_label = _safe_str(existing_account.get("label"))
-            else:
-                resolved_label = self._derive_label(label, metadata, account_num)
-            duplicate = self._account_by_label(data, resolved_label)
-            if duplicate is not None and duplicate != account_num:
-                raise ValidationError(
-                    f"{self.definition.display_name} account label '{resolved_label}' already "
-                    f"exists as Account-{duplicate}"
-                )
-
-            self._write_account_auth(account_num, active_auth)
-            self._set_account_record(data, account_num, resolved_label, metadata)
-            data["activeAccountNumber"] = int(account_num)
-            data["lastUpdated"] = get_timestamp()
-            self._write_json(self.sequence_file, data)
-
-        action = "Updated" if existing_num == account_num else "Added"
-        print(
-            f"{accent(action)} {self.definition.display_name} Account-{account_num}: "
-            f"{resolved_label}"
-        )
+        self._add_account_via_login(label, slot)
 
     def list_data(self, on_fetch: FetchProgress | None = None) -> list[ProviderAccountRow]:
         """Display-grade account rows for the CLI's human renderer."""
@@ -880,21 +823,12 @@ class ProviderAccountStore:
         return str(sequence[(current_index + 1) % len(sequence)])
 
     def switch(self, identifier: str | None, json_output: bool) -> dict | None:
-        self._setup_directories()
-        if self.definition.switch_mode == "snapshot-refused":
-            raise ConfigError(
-                f"{self.definition.display_name} cannot safely restore stored OpenAI OAuth "
-                f"snapshots. Run '{self.definition.frontend.login_command}' for the target "
-                "account, then re-add it."
-            )
-        return self._switch_symlink(identifier, json_output)
-
-    def _switch_symlink(self, identifier: str | None, json_output: bool) -> dict | None:
         """Switch by repointing the active auth symlink at the target's stored file.
 
         No byte copy and no re-snapshot: the outgoing account's file is the live
         file Codex already rotates in place, so it is current by construction.
         """
+        self._setup_directories()
         with FileLock(self.lock_file):
             data = self._sequence_data()
             if not data.get("accounts"):
@@ -913,10 +847,9 @@ class ProviderAccountStore:
 
             target_file = self._auth_backup_path(target_account)
             if not target_file.exists():
-                ref = self.definition.ref
                 raise ConfigError(
                     f"{self.definition.display_name} Account-{target_account} has no stored "
-                    f"credential. Re-add it with: cswap {ref.frontend} {ref.backend} "
+                    f"credential. Re-add it with: cswap {self.definition.ref.frontend} "
                     f"add --slot {target_account}"
                 )
 

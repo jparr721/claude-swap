@@ -87,8 +87,7 @@ def _isolate_real_home(request, tmp_path_factory, monkeypatch):
     ``~/Library/Keychains``. An isolated ``$HOME`` makes those commands fail. The
     fixture itself swaps the default keychain to a throwaway one and restores it.
 
-    Always neutralize ``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``, ``OPENCODE_DATA_HOME``,
-    and ``XDG_DATA_HOME``
+    Always neutralize ``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``, and ``XDG_DATA_HOME``
     (even for ``temp_home`` tests): these vars bypass ``$HOME`` in path resolution
     (``paths.get_global_config_path``/``get_codex_auth_path``/``get_backup_root``),
     so a developer with any exported could otherwise have tests read/write real
@@ -97,7 +96,6 @@ def _isolate_real_home(request, tmp_path_factory, monkeypatch):
     """
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_DATA_HOME", raising=False)
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     if "temp_home" in request.fixturenames:
         return  # temp_home provides its own isolated home

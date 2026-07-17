@@ -230,7 +230,7 @@ def _last_call(stub: type[_StubSwitcher]) -> tuple[str, dict[str, object]]:
 
 
 def test_claude_list_is_claude_only(stub_switcher: type[_StubSwitcher]) -> None:
-    result = runner.invoke(app, ["claude", "default", "list", "--json"])
+    result = runner.invoke(app, ["claude", "list", "--json"])
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["schemaVersion"] == 1  # NOT the aggregate v2 envelope
@@ -241,19 +241,19 @@ def test_claude_list_token_status_conflicts_with_json(
     stub_switcher: type[_StubSwitcher],
 ) -> None:
     result = runner.invoke(
-        app, ["claude", "default", "list", "--json", "--token-status"]
+        app, ["claude", "list", "--json", "--token-status"]
     )
     assert result.exit_code == 2
 
 
 def test_claude_status(stub_switcher: type[_StubSwitcher]) -> None:
-    result = runner.invoke(app, ["claude", "default", "status"])
+    result = runner.invoke(app, ["claude", "status"])
     assert result.exit_code == 0
     assert _last_call(stub_switcher) == ("status_data", {})
 
 
 def test_claude_add_with_slot(stub_switcher: type[_StubSwitcher]) -> None:
-    result = runner.invoke(app, ["claude", "default", "add", "--slot", "3"])
+    result = runner.invoke(app, ["claude", "add", "--slot", "3"])
     assert result.exit_code == 0
     assert _last_call(stub_switcher) == ("add_account", {"slot": 3})
 
@@ -261,7 +261,7 @@ def test_claude_add_with_slot(stub_switcher: type[_StubSwitcher]) -> None:
 def test_claude_add_token(stub_switcher: type[_StubSwitcher]) -> None:
     result = runner.invoke(
         app,
-        ["claude", "default", "add-token", "sk-tok", "--email", "me@x.com", "--slot", "2"],
+        ["claude", "add-token", "sk-tok", "--email", "me@x.com", "--slot", "2"],
     )
     assert result.exit_code == 0
     assert _last_call(stub_switcher) == (
@@ -271,7 +271,7 @@ def test_claude_add_token(stub_switcher: type[_StubSwitcher]) -> None:
 
 
 def test_claude_bare_switch_rotates(stub_switcher: type[_StubSwitcher]) -> None:
-    result = runner.invoke(app, ["claude", "default", "switch"])
+    result = runner.invoke(app, ["claude", "switch"])
     assert result.exit_code == 0
     # The switch call itself lands first; the post-switch table render
     # (list_data) follows it - see test_claude_switch_renders_accounts_table.
@@ -282,7 +282,7 @@ def test_claude_bare_switch_rotates(stub_switcher: type[_StubSwitcher]) -> None:
 
 
 def test_claude_switch_with_strategy(stub_switcher: type[_StubSwitcher]) -> None:
-    result = runner.invoke(app, ["claude", "default", "switch", "--strategy", "best"])
+    result = runner.invoke(app, ["claude", "switch", "--strategy", "best"])
     assert result.exit_code == 0
     assert stub_switcher.last.calls[0] == (
         "switch",
@@ -293,12 +293,12 @@ def test_claude_switch_with_strategy(stub_switcher: type[_StubSwitcher]) -> None
 def test_claude_switch_rejects_unknown_strategy(
     stub_switcher: type[_StubSwitcher],
 ) -> None:
-    result = runner.invoke(app, ["claude", "default", "switch", "--strategy", "bogus"])
+    result = runner.invoke(app, ["claude", "switch", "--strategy", "bogus"])
     assert result.exit_code == 2  # enum choices enforced at the CLI boundary
 
 
 def test_claude_switch_positional_target(stub_switcher: type[_StubSwitcher]) -> None:
-    result = runner.invoke(app, ["claude", "default", "switch", "2"])
+    result = runner.invoke(app, ["claude", "switch", "2"])
     assert result.exit_code == 0
     assert stub_switcher.last.calls[0] == (
         "switch_to",
@@ -308,7 +308,7 @@ def test_claude_switch_positional_target(stub_switcher: type[_StubSwitcher]) -> 
 
 def test_claude_switch_to_flag_and_force(stub_switcher: type[_StubSwitcher]) -> None:
     result = runner.invoke(
-        app, ["claude", "default", "switch", "--to", "me@x.com", "--force"]
+        app, ["claude", "switch", "--to", "me@x.com", "--force"]
     )
     assert result.exit_code == 0
     assert stub_switcher.last.calls[0] == (
@@ -319,14 +319,14 @@ def test_claude_switch_to_flag_and_force(stub_switcher: type[_StubSwitcher]) -> 
 
 def test_claude_switch_renders_accounts_table(stub_switcher: type[_StubSwitcher]) -> None:
     """A successful human-mode switch renders the account table afterward."""
-    result = runner.invoke(app, ["claude", "default", "switch", "2"])
+    result = runner.invoke(app, ["claude", "switch", "2"])
     assert result.exit_code == 0
     assert stub_switcher.last.calls[1] == ("list_data", {"show_token_status": False})
 
 
 def test_claude_switch_json_skips_table_render(stub_switcher: type[_StubSwitcher]) -> None:
     """--json mode must never render the human account table."""
-    result = runner.invoke(app, ["claude", "default", "switch", "2", "--json"])
+    result = runner.invoke(app, ["claude", "switch", "2", "--json"])
     assert result.exit_code == 0
     assert stub_switcher.last.calls == [
         ("switch_to", {"identifier": "2", "json_output": True, "force": False}),
@@ -361,30 +361,30 @@ def test_claude_switch_survives_post_display_failure(
     monkeypatch.setattr(_StubSwitcher, "switch_to", switch_to_and_print)
     monkeypatch.setattr(_StubSwitcher, "list_data", boom)
 
-    result = runner.invoke(app, ["claude", "default", "switch", "2"])
+    result = runner.invoke(app, ["claude", "switch", "2"])
 
     assert result.exit_code == 0
     assert "Switched" in result.stdout
-    assert "usage display unavailable - run: cswap claude default list" in result.stdout
+    assert "usage display unavailable - run: cswap claude list" in result.stdout
 
 
 def test_claude_switch_rejects_both_positional_and_to(
     stub_switcher: type[_StubSwitcher],
 ) -> None:
-    assert runner.invoke(app, ["claude", "default", "switch", "2", "--to", "3"]).exit_code == 2
+    assert runner.invoke(app, ["claude", "switch", "2", "--to", "3"]).exit_code == 2
 
 
 def test_claude_switch_strategy_conflicts_with_target(
     stub_switcher: type[_StubSwitcher],
 ) -> None:
     result = runner.invoke(
-        app, ["claude", "default", "switch", "2", "--strategy", "best"]
+        app, ["claude", "switch", "2", "--strategy", "best"]
     )
     assert result.exit_code == 2
 
 
 def test_claude_remove(stub_switcher: type[_StubSwitcher]) -> None:
-    result = runner.invoke(app, ["claude", "default", "remove", "2"])
+    result = runner.invoke(app, ["claude", "remove", "2"])
     assert result.exit_code == 0
     assert _last_call(stub_switcher) == ("remove_account", {"identifier": "2"})
 
@@ -404,12 +404,12 @@ def test_claude_export_and_import(
     monkeypatch.setattr("claude_swap.transfer.import_accounts", fake_import)
 
     assert runner.invoke(
-        app, ["claude", "default", "export", "out.json", "--account", "2", "--full"]
+        app, ["claude", "export", "out.json", "--account", "2", "--full"]
     ).exit_code == 0
     assert recorded["export"] == ("out.json", "2", True)
 
     assert runner.invoke(
-        app, ["claude", "default", "import", "in.json", "--force"]
+        app, ["claude", "import", "in.json", "--force"]
     ).exit_code == 0
     assert recorded["import"] == ("in.json", True)
 
@@ -422,7 +422,7 @@ def test_claude_json_error_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
             raise ConfigError("boom")
 
     monkeypatch.setattr("claude_swap.cli.ClaudeAccountSwitcher", _BrokenSwitcher)
-    result = runner.invoke(app, ["claude", "default", "status", "--json"])
+    result = runner.invoke(app, ["claude", "status", "--json"])
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
     assert payload["error"]["message"] == "boom"
@@ -451,7 +451,7 @@ def test_run_forwards_args_after_double_dash(
     monkeypatch.setattr("claude_swap.session.SessionManager", _StubSession)
     result = runner.invoke(
         app,
-        ["claude", "default", "run", "2", "--no-share", "--", "--resume", "-p", "hi"],
+        ["claude", "run", "2", "--no-share", "--", "--resume", "-p", "hi"],
     )
     assert result.exit_code == 0
     assert recorded["run"] == ("2", ["--resume", "-p", "hi"], False, False)
@@ -460,7 +460,7 @@ def test_run_forwards_args_after_double_dash(
 def test_run_rejects_unknown_options_before_double_dash(
     stub_switcher: type[_StubSwitcher],
 ) -> None:
-    result = runner.invoke(app, ["claude", "default", "run", "2", "--bogus-flag"])
+    result = runner.invoke(app, ["claude", "run", "2", "--bogus-flag"])
     assert result.exit_code == 2
 
 
@@ -482,7 +482,7 @@ def test_auto_once_exit_code_reflects_tick_outcome(
 
     monkeypatch.setattr("claude_swap.autoswitch.AutoSwitchEngine", _StubEngine)
     result = runner.invoke(
-        app, ["claude", "default", "auto", "--once", "--threshold", "80", "--dry-run"]
+        app, ["claude", "auto", "--once", "--threshold", "80", "--dry-run"]
     )
     assert result.exit_code == 2
     assert captured["dry_run"] is True
@@ -537,8 +537,43 @@ def stub_provider(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     return captured
 
 
+def test_claude_commands_do_not_require_a_backend(
+    stub_switcher: type[_StubSwitcher],
+) -> None:
+    result = runner.invoke(app, ["claude", "list", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["schemaVersion"] == 1
+
+
+def test_codex_commands_do_not_require_a_backend(
+    stub_provider: dict[str, object],
+) -> None:
+    result = runner.invoke(app, ["codex", "list", "--json"])
+
+    assert result.exit_code == 0
+    assert stub_provider["ref"] == ("codex", "openai")
+
+
+def test_opencode_command_is_not_registered() -> None:
+    result = runner.invoke(app, ["opencode", "openai", "list"])
+
+    assert result.exit_code == 2
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["claude", "default", "list"],
+        ["codex", "openai", "list"],
+    ],
+)
+def test_backend_selectors_are_not_registered(argv: list[str]) -> None:
+    assert runner.invoke(app, argv).exit_code == 2
+
+
 def test_codex_list_json(stub_provider: dict[str, object]) -> None:
-    result = runner.invoke(app, ["codex", "openai", "list", "--json"])
+    result = runner.invoke(app, ["codex", "list", "--json"])
     assert result.exit_code == 0
     assert stub_provider["ref"] == ("codex", "openai")
     assert stub_provider["store"].calls == [("list_accounts", {})]
@@ -547,16 +582,16 @@ def test_codex_list_json(stub_provider: dict[str, object]) -> None:
 
 def test_codex_add_with_label_and_slot(stub_provider: dict[str, object]) -> None:
     result = runner.invoke(
-        app, ["codex", "openai", "add", "--label", "work", "--slot", "2"]
+        app, ["codex", "add", "--label", "work", "--slot", "2"]
     )
     assert result.exit_code == 0
     assert stub_provider["store"].calls == [("add_account", {"label": "work", "slot": 2})]
 
 
 def test_codex_switch_positional_and_to_flag(stub_provider: dict[str, object]) -> None:
-    assert runner.invoke(app, ["codex", "openai", "switch", "2"]).exit_code == 0
-    assert runner.invoke(app, ["codex", "openai", "switch", "--to", "work"]).exit_code == 0
-    assert runner.invoke(app, ["codex", "openai", "switch"]).exit_code == 0  # rotate
+    assert runner.invoke(app, ["codex", "switch", "2"]).exit_code == 0
+    assert runner.invoke(app, ["codex", "switch", "--to", "work"]).exit_code == 0
+    assert runner.invoke(app, ["codex", "switch"]).exit_code == 0  # rotate
     assert stub_provider["store"].calls == [
         ("switch", {"identifier": "2", "json_output": False}),
         ("switch", {"identifier": "work", "json_output": False}),
@@ -567,28 +602,13 @@ def test_codex_switch_positional_and_to_flag(stub_provider: dict[str, object]) -
 def test_codex_switch_rejects_both_positional_and_to(
     stub_provider: dict[str, object],
 ) -> None:
-    result = runner.invoke(app, ["codex", "openai", "switch", "2", "--to", "work"])
+    result = runner.invoke(app, ["codex", "switch", "2", "--to", "work"])
     assert result.exit_code == 2
 
 
 def test_codex_remove(stub_provider: dict[str, object]) -> None:
-    assert runner.invoke(app, ["codex", "openai", "remove", "2"]).exit_code == 0
+    assert runner.invoke(app, ["codex", "remove", "2"]).exit_code == 0
     assert stub_provider["store"].calls == [("remove_account", {"identifier": "2"})]
-
-
-def test_opencode_switch_is_refused(temp_home: Path) -> None:
-    # Real registry + real store: snapshot-refused providers error before
-    # touching any account state. Note: on click versions that separate
-    # stderr, check result.stderr instead of result.output for the message.
-    result = runner.invoke(app, ["opencode", "openai", "switch", "1"])
-    assert result.exit_code == 1
-    assert "cannot safely restore" in result.output
-
-
-def test_opencode_verbs_exist(stub_provider: dict[str, object]) -> None:
-    result = runner.invoke(app, ["opencode", "openai", "list"])
-    assert result.exit_code == 0
-    assert stub_provider["ref"] == ("opencode", "openai")
 
 
 # --------------------------------------------------------------------------
@@ -623,9 +643,9 @@ def test_bare_cswap_prints_help() -> None:
     assert "claude" in result.output and "codex" in result.output
 
 
-def test_frontend_without_backend_shows_help() -> None:
+def test_frontend_without_verb_shows_help() -> None:
     result = runner.invoke(app, ["codex"])
-    assert "openai" in result.output
+    assert "list" in result.output
 
 
 # --------------------------------------------------------------------------
@@ -656,7 +676,7 @@ def test_run_session_error_exits_cleanly(
             raise SessionError("boom")
 
     monkeypatch.setattr("claude_swap.session.SessionManager", _FailingSession)
-    result = runner.invoke(app, ["claude", "default", "run", "2"])
+    result = runner.invoke(app, ["claude", "run", "2"])
     assert result.exit_code == 1
     assert "boom" in result.stderr
 
@@ -782,7 +802,7 @@ def test_auto_loop_mode_returns_loop_exit(
             pass
 
     monkeypatch.setattr("claude_swap.autoswitch.AutoSwitchEngine", _LoopEngine)
-    result = runner.invoke(app, ["claude", "default", "auto"])
+    result = runner.invoke(app, ["claude", "auto"])
     assert result.exit_code == 0
     assert instances  # the loop path constructed the engine
 
@@ -813,7 +833,7 @@ def test_auto_flags_override_settings_file(
 
     monkeypatch.setattr("claude_swap.autoswitch.AutoSwitchEngine", _CaptureEngine)
     result = runner.invoke(
-        app, ["claude", "default", "auto", "--once", "--threshold", "60"]
+        app, ["claude", "auto", "--once", "--threshold", "60"]
     )
     assert result.exit_code == 2
     assert captured["settings"].threshold == 60.0        # CLI wins
@@ -839,7 +859,7 @@ def test_auto_json_stdout_is_pure_jsonl(
             return types.SimpleNamespace(value=2)
 
     monkeypatch.setattr("claude_swap.autoswitch.AutoSwitchEngine", _EmittingEngine)
-    result = runner.invoke(app, ["claude", "default", "auto", "--once", "--json"])
+    result = runner.invoke(app, ["claude", "auto", "--once", "--json"])
     assert result.exit_code == 2
     lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
     assert len(lines) == 2
@@ -858,6 +878,6 @@ def test_auto_switcher_error_exits_1(
         raise ConfigError("nope")
 
     monkeypatch.setattr("claude_swap.cli.ClaudeAccountSwitcher", boom)
-    result = runner.invoke(app, ["claude", "default", "auto", "--once"])
+    result = runner.invoke(app, ["claude", "auto", "--once"])
     assert result.exit_code == 1
     assert "nope" in result.stderr

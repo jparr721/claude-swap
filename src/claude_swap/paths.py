@@ -74,19 +74,6 @@ def get_codex_auth_path() -> Path:
     return get_codex_home() / "auth.json"
 
 
-def get_opencode_data_home() -> Path:
-    """Return the opencode data directory."""
-    env = os.environ.get("OPENCODE_DATA_HOME")
-    if env:
-        return Path(env).expanduser()
-    return Path.home() / ".local" / "share" / "opencode"
-
-
-def get_opencode_auth_path() -> Path:
-    """Return the active opencode auth file path."""
-    return get_opencode_data_home() / "auth.json"
-
-
 def get_provider_store_root(frontend: str, backend: str) -> Path:
     """Return the provider store directory under the backup root."""
     return get_backup_root() / "providers" / frontend / backend

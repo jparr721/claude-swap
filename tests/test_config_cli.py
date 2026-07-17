@@ -255,5 +255,5 @@ class TestConfigMisc:
                 return TickOutcome.NO_ACTION
 
         monkeypatch.setattr("claude_swap.autoswitch.AutoSwitchEngine", FakeEngine)
-        runner.invoke(app, ["claude", "default", "auto", "--once"])
+        runner.invoke(app, ["claude", "auto", "--once"])
         assert captured["settings"].threshold == 77.0
