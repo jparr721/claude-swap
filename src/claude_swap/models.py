@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -15,6 +16,29 @@ from claude_swap.usage_store import UsageEntry
 
 if TYPE_CHECKING:
     from claude_swap.switcher import ClaudeAccountSwitcher
+
+
+_ALIAS_RE = re.compile(r"^[a-z0-9_.-]+$")
+
+
+def normalize_alias(name: str) -> str:
+    """Lowercase and validate a proposed account alias."""
+    normalized = name.strip().lower()
+    if not normalized:
+        raise ValueError("alias cannot be empty")
+    if normalized.isdigit():
+        raise ValueError(
+            f"alias '{name}' cannot be purely numeric (reserved for slot numbers)"
+        )
+    if normalized.startswith("-"):
+        raise ValueError(
+            f"alias '{name}' cannot start with '-' (would be read as a command flag)"
+        )
+    if not _ALIAS_RE.match(normalized):
+        raise ValueError(
+            f"alias '{name}' may only contain letters, digits, '-', '_', and '.'"
+        )
+    return normalized
 
 
 class Platform(Enum):
@@ -159,6 +183,8 @@ class ClaudeAccountRow:
     is_active: bool
     usage: UsageEntry
     token_status: str | None
+    alias: str = ""
+    disabled: bool = False
 
 
 @dataclass(frozen=True)

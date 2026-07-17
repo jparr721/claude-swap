@@ -56,6 +56,20 @@ def get_global_config_path() -> Path:
     return base / ".claude.json"
 
 
+def get_default_global_config_path() -> Path:
+    """Return the global config path of the *default* profile.
+
+    Same legacy fallback as :func:`get_global_config_path`, but deliberately
+    ignores ``CLAUDE_CONFIG_DIR``: callers that mirror the user's real profile
+    (session sharing) must not source from another session when invoked from
+    inside one.
+    """
+    legacy = Path.home() / ".claude" / ".config.json"
+    if legacy.exists():
+        return legacy
+    return Path.home() / ".claude.json"
+
+
 def get_credentials_path() -> Path:
     """Return the path to the Claude credentials file."""
     return get_claude_config_home() / ".credentials.json"
@@ -191,7 +205,7 @@ def migrate_legacy_backup_dir(target: Path) -> bool:
             if _target_has_meaningful_data(target):
                 raise MigrationError(
                     f"Both legacy ({legacy}) and new ({target}) backup paths exist. "
-                    f"Refusing to merge or overwrite — inspect both and remove the "
+                    f"Refusing to merge or overwrite - inspect both and remove the "
                     f"stale one manually before re-running."
                 )
             _wipe_throwaway_artifacts(target)
@@ -202,7 +216,7 @@ def migrate_legacy_backup_dir(target: Path) -> bool:
         flag.unlink()
     except OSError as exc:
         raise MigrationError(
-            f"Migration of {legacy} → {target} failed: {exc}"
+            f"Migration of {legacy} -> {target} failed: {exc}"
         ) from exc
 
     return True

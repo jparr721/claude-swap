@@ -65,8 +65,13 @@ class _StubSwitcher:
             email=None, account_number=None, tag="", total_accounts=0, usage=None
         )
 
-    def add_account(self, slot: int | None = None, assume_yes: bool = False) -> None:
-        self.calls.append(("add_account", {"slot": slot}))
+    def add_account(
+        self,
+        slot: int | None = None,
+        alias: str | None = None,
+        assume_yes: bool = False,
+    ) -> None:
+        self.calls.append(("add_account", {"slot": slot, "alias": alias}))
 
     def add_account_from_token(
         self,
@@ -79,8 +84,24 @@ class _StubSwitcher:
             ("add_account_from_token", {"token": token, "email": email, "slot": slot})
         )
 
-    def switch(self, strategy: str | None = None, json_output: bool = False) -> dict | None:
-        self.calls.append(("switch", {"strategy": strategy, "json_output": json_output}))
+    def switch(
+        self,
+        strategy: str | None = None,
+        json_output: bool = False,
+        models: tuple[str, ...] = (),
+        model_source: str | None = None,
+    ) -> dict | None:
+        self.calls.append(
+            (
+                "switch",
+                {
+                    "strategy": strategy,
+                    "json_output": json_output,
+                    "models": models,
+                    "model_source": model_source,
+                },
+            )
+        )
         return {"schemaVersion": 1, "switched": True} if json_output else None
 
     def switch_to(
@@ -255,7 +276,10 @@ def test_claude_status(stub_switcher: type[_StubSwitcher]) -> None:
 def test_claude_add_with_slot(stub_switcher: type[_StubSwitcher]) -> None:
     result = runner.invoke(app, ["claude", "add", "--slot", "3"])
     assert result.exit_code == 0
-    assert _last_call(stub_switcher) == ("add_account", {"slot": 3})
+    assert _last_call(stub_switcher) == (
+        "add_account",
+        {"slot": 3, "alias": None},
+    )
 
 
 def test_claude_add_token(stub_switcher: type[_StubSwitcher]) -> None:
@@ -277,7 +301,12 @@ def test_claude_bare_switch_rotates(stub_switcher: type[_StubSwitcher]) -> None:
     # (list_data) follows it - see test_claude_switch_renders_accounts_table.
     assert stub_switcher.last.calls[0] == (
         "switch",
-        {"strategy": None, "json_output": False},
+        {
+            "strategy": None,
+            "json_output": False,
+            "models": (),
+            "model_source": None,
+        },
     )
 
 
@@ -286,7 +315,12 @@ def test_claude_switch_with_strategy(stub_switcher: type[_StubSwitcher]) -> None
     assert result.exit_code == 0
     assert stub_switcher.last.calls[0] == (
         "switch",
-        {"strategy": "best", "json_output": False},
+        {
+            "strategy": "best",
+            "json_output": False,
+            "models": (),
+            "model_source": None,
+        },
     )
 
 

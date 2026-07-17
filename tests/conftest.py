@@ -74,7 +74,7 @@ def _make_fake_keyring() -> types.ModuleType:
 def _isolate_real_home(request, tmp_path_factory, monkeypatch):
     """Safety net: no test may read or write the developer's real ``$HOME``.
 
-    Some tests (CLI/TUI argument tests that call ``main()``, etc.) construct a real
+    Some CLI argument tests that call ``main()`` construct a real
     ``ClaudeAccountSwitcher`` without the ``temp_home`` fixture. Without isolation
     that switcher resolves to the real ``~/.claude-swap-backup`` — writing logs,
     running data migrations, and reading the real account list. Redirect ``$HOME``
@@ -274,3 +274,10 @@ def sample_sequence_data_with_org():
             },
         },
     }
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_poll_jitter(monkeypatch):
+    """Zero the poll-plan jitter so cadence tests are clock-exact; the jitter
+    itself is exercised in test_poll_policy via an injected rng."""
+    monkeypatch.setattr("claude_swap.poll_policy.JITTER_FRAC", 0.0)

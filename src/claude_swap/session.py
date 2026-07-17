@@ -48,13 +48,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
 from claude_swap import macos_keychain
-from claude_swap.exceptions import SessionError
+from claude_swap.claude_locks import proper_lockfile
+from claude_swap.exceptions import ClaudeCodeLockTimeout, SessionError
 from claude_swap.macos_keychain import KeychainError
 from claude_swap.locking import FileLock
 from claude_swap.models import Platform
 from claude_swap.oauth import refresh_oauth_credentials
+from claude_swap.paths import get_default_global_config_path
 from claude_swap.printer import accent, dimmed, muted, warning
 from claude_swap.process_detection import ClaudeSession, list_sessions
+from claude_swap.settings import atomic_write_json
 
 if TYPE_CHECKING:
     from claude_swap.switcher import ClaudeAccountSwitcher
@@ -64,6 +67,8 @@ if TYPE_CHECKING:
 # sessions/, ide/, .claude.json, .credentials.json, statsig/ and other
 # telemetry. projects/ and history.jsonl are per-account by default and move
 # to HISTORY_ITEMS sharing only with the opt-in --share-history flag.
+# .claude.json stays excluded as a file, but its one user-scoped key —
+# top-level mcpServers — is mirrored separately by _sync_mcp_servers.
 SHARED_ITEMS = (
     "settings.json",
     "keybindings.json",
@@ -89,6 +94,18 @@ SHARE_MANIFEST = ".cswap-shared.json"
 # profile must be re-bootstrapped on the next non-live `cswap run` even if it
 # still passes the local reuse check.
 STALE_MARKER = ".cswap-stale-credentials"
+
+# The user-scope MCP key mirrored from the default profile's .claude.json.
+MCP_KEY = "mcpServers"
+
+# Adoption marker: this profile's mcpServers is (or was) cswap-mirrored. Gates
+# both the one-time migration stash and --no-share's removal of the key, so
+# pre-feature session-local definitions are never silently destroyed.
+MCP_MIRROR_MARKER = ".cswap-mcp-mirror-v1"
+
+# One-time migration stash: session-local MCP definitions displaced by the
+# first mirror land here (write-once) instead of vanishing.
+MCP_DISPLACED_STASH = ".cswap-mcp-displaced.json"
 
 
 def mark_session_stale(session_dir: Path) -> None:
@@ -207,9 +224,60 @@ def read_session_credentials(session_dir: Path) -> str | None:
         except KeychainError:
             pass  # locked/denied/timeout — the plaintext seed is the next-best truth
     try:
-        return (session_dir / ".credentials.json").read_text()
-    except OSError:
+        return (session_dir / ".credentials.json").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        # ValueError covers UnicodeDecodeError: a byte-corrupt file is "no
+        # readable credential material", not an error to propagate.
         return None
+
+
+def read_session_identity(session_dir: Path) -> tuple[str, str] | None:
+    """Best-effort read of the account identity a session profile is logged in as.
+
+    Claude records the logged-in account in the profile's ``.claude.json``
+    ``oauthAccount`` and rewrites it on every (re-)login, so this reflects the
+    profile's *current* identity — which an in-session ``/login`` can re-point
+    at a different account than the slot the profile was created for. Returns
+    ``(email, organization_uuid)`` with ``""`` for a missing org, or ``None``
+    when no identity is readable (missing dir/file/field).
+    """
+    try:
+        text = (session_dir / ".claude.json").read_text(encoding="utf-8")
+        config = json.loads(text)
+    except (OSError, ValueError):
+        # ValueError covers JSONDecodeError and UnicodeDecodeError alike: a
+        # byte-corrupt file is an unreadable identity, and the usage-fetch
+        # path this feeds must never raise.
+        return None
+    if not isinstance(config, dict):
+        return None
+    oauth_account = config.get("oauthAccount") or {}
+    if not isinstance(oauth_account, dict):
+        return None
+    email = oauth_account.get("emailAddress") or ""
+    if not email:
+        return None
+    return email, oauth_account.get("organizationUuid") or ""
+
+
+def session_identity_drifted(session_dir: Path, email: str, org_uuid: str) -> bool:
+    """Whether the profile is logged in as a *different* account than its slot.
+
+    An in-session ``/login`` (e.g. after the slot's account hit its rate limit
+    mid-session) re-points the profile's credential at another account while
+    the profile directory keeps claiming the original slot. Comparison mirrors
+    ``_is_session_valid``: the email must match, the org only when both sides
+    have a value. An unreadable identity is NOT drift — missing metadata
+    degrades to trusting the profile (its token family is normally the slot's
+    freshest) rather than abandoning it over a broken ``.claude.json``.
+    """
+    identity = read_session_identity(session_dir)
+    if identity is None:
+        return False
+    profile_email, profile_org = identity
+    if profile_email != email:
+        return True
+    return bool(profile_org and org_uuid and profile_org != org_uuid)
 
 
 def live_sessions_for(session_dir: Path) -> list[ClaudeSession]:
@@ -295,7 +363,7 @@ class SessionManager:
                 print(
                     dimmed(
                         f"Account-{account_num} ({email}) is already the active "
-                        "default login — launching claude directly."
+                        "default login - launching claude directly."
                     )
                 )
                 self._exec(claude_bin, claude_args, env=dict(os.environ))
@@ -303,7 +371,7 @@ class SessionManager:
         scrubbed = [v for v in AUTH_OVERRIDE_ENV_VARS if os.environ.get(v)]
         if scrubbed:
             warning(
-                f"Ignoring {', '.join(scrubbed)} for this session — it would "
+                f"Ignoring {', '.join(scrubbed)} for this session - it would "
                 f"override the selected account inside Claude Code."
             )
 
@@ -320,6 +388,22 @@ class SessionManager:
         }
         env["CLAUDE_CONFIG_DIR"] = str(session_dir)
         self._exec(claude_bin, claude_args, env=env)
+
+    def exec_default(self, claude_args: list[str]) -> NoReturn:
+        """Launch plain Claude Code with the current default login.
+
+        Used by `cswap run` (no account) when the cwd has no mapping, or its
+        mapped account no longer exists. Equivalent to typing `claude`
+        directly: the unmodified environment is passed through (no session
+        profile, no auth-override scrubbing), so whatever the default login
+        resolves to is what runs.
+        """
+        claude_bin = shutil.which("claude")
+        if not claude_bin:
+            raise SessionError(
+                "'claude' was not found on PATH. Install Claude Code first."
+            )
+        self._exec(claude_bin, claude_args, env=dict(os.environ))
 
     def _exec(self, claude_bin: str, claude_args: list[str], env: dict[str, str]) -> NoReturn:
         """Hand the terminal over to claude. Never returns.
@@ -546,18 +630,22 @@ class SessionManager:
     ) -> None:
         """Mirror shared items from ~/.claude into the profile (or undo it).
 
-        ``share`` governs SHARED_ITEMS (customizations); ``share_history``
-        governs HISTORY_ITEMS (conversation history) — independent concerns,
-        so ``--no-share --share-history`` gives a bare profile with unified
-        history. Idempotent; runs on every launch. Deliberately sources from
-        the default ``~/.claude`` (not ``get_claude_config_home()``): sharing
+        ``share`` governs SHARED_ITEMS (customizations) and the mcpServers
+        mirror (see ``_sync_mcp_servers`` — its --no-share removal is gated
+        on the adoption marker); ``share_history`` governs HISTORY_ITEMS
+        (conversation history) — independent concerns, so ``--no-share
+        --share-history`` gives a bare profile with unified history.
+        Idempotent; runs on every launch. Deliberately sources from the
+        default ``~/.claude`` (not ``get_claude_config_home()``): sharing
         always mirrors the default profile, even when ``CLAUDE_CONFIG_DIR``
-        is set in the invoking environment. Lock-free on the reuse path:
-        concurrent runs with different flags are last-writer-wins and
-        self-heal on the next launch.
+        is set in the invoking environment. File/dir sharing is lock-free on
+        the reuse path — concurrent runs with different flags are last-writer-
+        wins and self-heal on the next launch; only the MCP mirror takes
+        Claude's config lock, and only when it needs to write.
         """
         if not session_dir.is_dir():
             return
+        self._sync_mcp_servers(session_dir, share)
         # History links are POSIX-only (run() rejects the flag on Windows;
         # this also drops any links left by a POSIX→Windows profile move).
         if self.switcher.platform == Platform.WINDOWS:
@@ -648,6 +736,196 @@ class SessionManager:
         # truncated file.
         self._write_manifest(manifest_path, new_managed)
 
+    def _sync_mcp_servers(self, session_dir: Path, share: bool) -> None:
+        """Mirror the default profile's user-scope ``mcpServers`` (issue #139).
+
+        Pure mirror: the default profile is the single source of truth, so
+        adds, edits, and deletions all propagate, and MCP changes made inside
+        a session are overwritten the next time cswap prepares the profile.
+        Nothing ever flows back into the default config, and per-project
+        (``projects[…].mcpServers``) entries are untouched on both sides.
+
+        ``share=False`` removes the mirrored key — but only from profiles
+        that have adopted mirroring (MCP_MIRROR_MARKER), so ``--no-share``
+        can never destroy pre-feature session-local definitions. The first
+        mirror on an unadopted profile stashes any definitions it would
+        displace into MCP_DISPLACED_STASH (write-once) before resetting.
+
+        Fail-open throughout: an unreadable or malformed file on either side,
+        a symlinked target, or a contended lock leaves the profile untouched
+        and never blocks the launch. The adopted in-sync steady state takes
+        no lock and writes nothing; first adoption always goes through the
+        lock so the marker can never certify a state a concurrent claude
+        changed between the read and the touch.
+        """
+        config_path = session_dir / ".claude.json"
+        marker = session_dir / MCP_MIRROR_MARKER
+
+        if share:
+            source = self._read_mcp_source()
+            if source is None:
+                return
+        elif marker.exists():
+            source = {}  # remove what we mirrored; restored on a share run
+        else:
+            return  # never adopted: --no-share must not touch local data
+
+        # Type-check before reading: reading a FIFO would hang the launch,
+        # and a symlinked target must never be written through or replaced.
+        if not config_path.exists():
+            return  # bootstrap/validation owns a missing config
+        if config_path.is_symlink() or not config_path.is_file():
+            self._logger.warning(
+                f"Not syncing MCP servers: {config_path} is not a regular file."
+            )
+            return
+
+        existing = self._load_json_object(config_path)
+        if existing is None:
+            return  # bootstrap/validation owns a broken config
+        target = existing.get(MCP_KEY, {})
+        if not isinstance(target, dict):
+            self._logger.warning(
+                f"Not syncing MCP servers: the profile's {MCP_KEY} is not "
+                "an object."
+            )
+            return
+        if target == source and (not share or marker.exists()):
+            return
+
+        # The same lock a claude running in this profile takes for its own
+        # .claude.json writes (CLAUDE_CONFIG_DIR is the session dir), so the
+        # splice below never interleaves with its config writes.
+        lock_dir = config_path.parent / (config_path.name + ".lock")
+        try:
+            with proper_lockfile(lock_dir):
+                # Re-read both sides: a writer that waited here must not
+                # clobber a newer mirror with its stale pre-lock snapshot.
+                if share:
+                    source = self._read_mcp_source()
+                    if source is None:
+                        return
+                if config_path.is_symlink() or not config_path.is_file():
+                    return
+                existing = self._load_json_object(config_path)
+                if existing is None:
+                    return
+                target = existing.get(MCP_KEY, {})
+                if not isinstance(target, dict):
+                    return
+                if target == source:
+                    if share:
+                        self._ensure_mcp_marker(marker)
+                    return
+                if share and not marker.exists():
+                    displaced = {
+                        name: value
+                        for name, value in target.items()
+                        if name not in source or source[name] != value
+                    }
+                    if displaced and not self._stash_displaced_mcp(
+                        session_dir, displaced
+                    ):
+                        return  # never destroy the only copy
+                if source:
+                    existing[MCP_KEY] = source
+                else:
+                    # Claude itself strips default-valued keys; match it.
+                    existing.pop(MCP_KEY, None)
+                try:
+                    atomic_write_json(config_path, existing)
+                except OSError as e:
+                    self._logger.warning(f"Could not sync MCP servers: {e}")
+                    return
+                if share:
+                    # Only after a successful write: an unadopted profile
+                    # whose marker fails to land simply retries next launch,
+                    # by then already in sync so nothing can be mis-stashed.
+                    self._ensure_mcp_marker(marker)
+        except (ClaudeCodeLockTimeout, OSError) as e:
+            # OSError covers lock-machinery failures (mkdir on a read-only
+            # or full filesystem); everything inside handles its own.
+            self._logger.warning(
+                f"Could not sync MCP servers ({e}) - skipping this launch."
+            )
+
+    @staticmethod
+    def _read_mcp_source() -> dict | None:
+        """The default profile's user-scope mcpServers, or None if unusable.
+
+        ``{}`` and ``None`` are distinct: a readable config without the key
+        genuinely has no user servers (``{}`` propagates the removal), while
+        a missing/corrupt config or a non-dict key returns ``None`` so the
+        caller leaves the profile untouched. Reads the default-home path
+        (ignoring CLAUDE_CONFIG_DIR — a nested `cswap run` must not source
+        from another session); no lock needed, claude's writes are atomic.
+        """
+        config = SessionManager._load_json_object(get_default_global_config_path())
+        if config is None:
+            return None
+        value = config.get(MCP_KEY, {})
+        return value if isinstance(value, dict) else None
+
+    @staticmethod
+    def _load_json_object(path: Path) -> dict | None:
+        # ValueError covers both JSONDecodeError and UnicodeDecodeError.
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _ensure_mcp_marker(self, marker: Path) -> None:
+        if marker.exists():
+            return
+        try:
+            marker.touch()
+        except OSError as e:
+            self._logger.warning(f"Could not write {marker.name}: {e}")
+
+    def _stash_displaced_mcp(self, session_dir: Path, displaced: dict) -> bool:
+        """Save definitions the first mirror would displace; False aborts it.
+
+        Write-once: a stash left by an earlier interrupted adoption is the
+        pre-feature data and must not be overwritten with mirror noise. But
+        only a *valid* stash counts as a saved copy — a directory, symlink,
+        or unrelated file squatting on the name must block the reset, not
+        green-light it.
+        """
+        stash = session_dir / MCP_DISPLACED_STASH
+        if stash.is_symlink() or stash.exists():
+            if self._is_valid_stash(stash):
+                return True
+            self._logger.warning(
+                f"{stash.name} exists but is not a valid stash; leaving "
+                "the profile's MCP servers in place."
+            )
+            return False
+        try:
+            atomic_write_json(
+                stash, {"schemaVersion": 1, MCP_KEY: displaced}
+            )
+        except OSError as e:
+            self._logger.warning(
+                f"Could not stash the profile's MCP servers ({e}); "
+                "leaving them in place."
+            )
+            return False
+        print(
+            dimmed(
+                "Session MCP servers now mirror your default profile; the "
+                f"profile's previous definitions were saved to {stash.name}."
+            )
+        )
+        return True
+
+    @staticmethod
+    def _is_valid_stash(stash: Path) -> bool:
+        if stash.is_symlink() or not stash.is_file():
+            return False
+        data = SessionManager._load_json_object(stash)
+        return data is not None and isinstance(data.get(MCP_KEY), dict)
+
     def _prepare_history_share(
         self, src: Path, dest: Path, session_dir: Path
     ) -> bool:
@@ -669,7 +947,7 @@ class SessionManager:
                 print(
                     dimmed(
                         f"Not sharing {dest.name} yet: another session is "
-                        "using this profile — retrying on the next launch."
+                        "using this profile - retrying on the next launch."
                     )
                 )
                 return False
@@ -689,7 +967,7 @@ class SessionManager:
             print(
                 dimmed(
                     f"Merged the profile's existing {dest.name} into "
-                    f"{src} — conversation history is now shared."
+                    f"{src} - conversation history is now shared."
                 )
             )
         if not src.exists():

@@ -17,12 +17,16 @@ from claude_swap import session as session_mod
 from claude_swap.exceptions import AccountNotFoundError, SessionError
 from claude_swap.models import Platform
 from claude_swap.session import (
+    MCP_DISPLACED_STASH,
+    MCP_MIRROR_MARKER,
     SHARE_MANIFEST,
     SessionManager,
     _probe_env,
     keychain_service_name,
     live_sessions_for,
+    read_session_identity,
     session_dir_for,
+    session_identity_drifted,
     slugify_email,
 )
 from claude_swap.switcher import ClaudeAccountSwitcher
@@ -214,6 +218,58 @@ class TestHelpers:
     def test_live_sessions_for_own_pid(self, tmp_path):
         make_live(tmp_path)
         assert [s.pid for s in live_sessions_for(tmp_path)] == [os.getpid()]
+
+
+class TestSessionIdentity:
+    """read_session_identity / session_identity_drifted: an in-session /login
+    can re-point a profile at a different account than its slot."""
+
+    def _write_identity(self, session_dir, email, org_uuid=None):
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / ".claude.json").write_text(json.dumps({
+            "oauthAccount": {"emailAddress": email, "organizationUuid": org_uuid}
+        }))
+
+    def test_reads_email_and_org(self, tmp_path):
+        self._write_identity(tmp_path, "a@x.com", "org-A")
+        assert read_session_identity(tmp_path) == ("a@x.com", "org-A")
+
+    def test_missing_org_reads_as_empty(self, tmp_path):
+        self._write_identity(tmp_path, "a@x.com", None)
+        assert read_session_identity(tmp_path) == ("a@x.com", "")
+
+    def test_unreadable_variants_return_none(self, tmp_path):
+        assert read_session_identity(tmp_path / "nope") is None  # no dir
+        (tmp_path / ".claude.json").write_text("{not json")
+        assert read_session_identity(tmp_path) is None  # invalid json
+        (tmp_path / ".claude.json").write_bytes(b"\xff\xfe{}")
+        assert read_session_identity(tmp_path) is None  # undecodable bytes
+        (tmp_path / ".claude.json").write_text(json.dumps({"oauthAccount": {}}))
+        assert read_session_identity(tmp_path) is None  # no email
+
+    def test_different_email_is_drift(self, tmp_path):
+        self._write_identity(tmp_path, "other@x.com", "org-A")
+        assert session_identity_drifted(tmp_path, "a@x.com", "org-A")
+
+    def test_same_email_different_org_is_drift(self, tmp_path):
+        # The j@ck.gg case: one email, two orgs — two distinct subscriptions.
+        self._write_identity(tmp_path, "a@x.com", "org-B")
+        assert session_identity_drifted(tmp_path, "a@x.com", "org-A")
+
+    def test_matching_identity_is_not_drift(self, tmp_path):
+        self._write_identity(tmp_path, "a@x.com", "org-A")
+        assert not session_identity_drifted(tmp_path, "a@x.com", "org-A")
+
+    def test_org_check_is_lenient_when_either_side_empty(self, tmp_path):
+        self._write_identity(tmp_path, "a@x.com", None)
+        assert not session_identity_drifted(tmp_path, "a@x.com", "org-A")
+        self._write_identity(tmp_path, "a@x.com", "org-B")
+        assert not session_identity_drifted(tmp_path, "a@x.com", "")
+
+    def test_unreadable_identity_is_not_drift(self, tmp_path):
+        assert not session_identity_drifted(tmp_path / "nope", "a@x.com", "org-A")
+        (tmp_path / ".claude.json").write_bytes(b"\xff\xfe{}")
+        assert not session_identity_drifted(tmp_path, "a@x.com", "org-A")
 
 
 # ---------------------------------------------------------------------------
@@ -626,6 +682,326 @@ class TestSharingWindowsMode:
 
 
 # ---------------------------------------------------------------------------
+# mcpServers mirror (issue #139)
+# ---------------------------------------------------------------------------
+
+GITHUB_MCP = {"type": "stdio", "command": "gh-mcp", "env": {"TOKEN": "abc"}}
+LOCAL_MCP = {"type": "stdio", "command": "mine"}
+
+
+@pytest.fixture
+def mcp_setup(temp_home: Path, seeded_switcher):
+    """A fake live default config and a session profile with its own config."""
+    default_config = temp_home / ".claude.json"
+    default_config.write_text(
+        json.dumps(
+            {
+                "oauthAccount": {"emailAddress": "default@example.com"},
+                "mcpServers": {"github": GITHUB_MCP},
+                "projects": {"/repo": {"mcpServers": {"proj-local": {}}}},
+            }
+        )
+    )
+    session_dir = session_dir_for(
+        seeded_switcher.backup_dir, ACCOUNT_NUM, ACCOUNT_EMAIL
+    )
+    session_dir.mkdir(parents=True)
+    (session_dir / ".claude.json").write_text(
+        json.dumps(
+            {
+                "oauthAccount": {"emailAddress": ACCOUNT_EMAIL},
+                "theme": "light",
+                "projects": {"/w": {"allowedTools": []}},
+            }
+        )
+    )
+    return default_config, session_dir, SessionManager(seeded_switcher)
+
+
+def _session_config(session_dir: Path) -> dict:
+    return json.loads((session_dir / ".claude.json").read_text())
+
+
+def _set_default_mcp(default_config: Path, servers: dict | None) -> None:
+    data = json.loads(default_config.read_text())
+    if servers is None:
+        data.pop("mcpServers", None)
+    else:
+        data["mcpServers"] = servers
+    default_config.write_text(json.dumps(data))
+
+
+class TestMcpMirror:
+    def test_bootstrap_launch_mirrors(
+        self, temp_home, manager, auth_status_tracks_seed, refresh_rotates
+    ):
+        (temp_home / ".claude.json").write_text(
+            json.dumps({"mcpServers": {"github": GITHUB_MCP}})
+        )
+        session_dir, _, _ = manager.setup_session("2", share=True)
+
+        config = _session_config(session_dir)
+        assert config["mcpServers"] == {"github": GITHUB_MCP}
+        assert config["oauthAccount"]["emailAddress"] == ACCOUNT_EMAIL
+        assert (session_dir / MCP_MIRROR_MARKER).exists()
+        assert not (session_dir / MCP_DISPLACED_STASH).exists()  # nothing displaced
+
+    def test_mirror_preserves_other_keys(self, mcp_setup):
+        default_config, session_dir, mgr = mcp_setup
+        mgr._sync_sharing(session_dir, share=True)
+
+        config = _session_config(session_dir)
+        assert config["mcpServers"] == {"github": GITHUB_MCP}
+        assert config["oauthAccount"]["emailAddress"] == ACCOUNT_EMAIL
+        assert config["theme"] == "light"
+        assert config["projects"] == {"/w": {"allowedTools": []}}
+
+    def test_edit_and_delete_propagate(self, mcp_setup):
+        default_config, session_dir, mgr = mcp_setup
+        mgr._sync_sharing(session_dir, share=True)
+
+        edited = {"github": {**GITHUB_MCP, "env": {"TOKEN": "rotated"}}, "new": {}}
+        _set_default_mcp(default_config, edited)
+        mgr._sync_sharing(session_dir, share=True)
+        assert _session_config(session_dir)["mcpServers"] == edited
+
+        _set_default_mcp(default_config, {"new": {}})
+        mgr._sync_sharing(session_dir, share=True)
+        assert _session_config(session_dir)["mcpServers"] == {"new": {}}
+
+    def test_default_without_key_removes_key(self, mcp_setup):
+        default_config, session_dir, mgr = mcp_setup
+        mgr._sync_sharing(session_dir, share=True)
+        _set_default_mcp(default_config, None)
+
+        mgr._sync_sharing(session_dir, share=True)
+
+        assert "mcpServers" not in _session_config(session_dir)
+
+    def test_legacy_config_json_source(self, mcp_setup, temp_home):
+        default_config, session_dir, mgr = mcp_setup
+        legacy = temp_home / ".claude" / ".config.json"
+        legacy.write_text(json.dumps({"mcpServers": {"legacy-src": {}}}))
+
+        mgr._sync_sharing(session_dir, share=True)
+
+        assert _session_config(session_dir)["mcpServers"] == {"legacy-src": {}}
+
+    def test_session_local_change_reset_without_stash(self, mcp_setup):
+        default_config, session_dir, mgr = mcp_setup
+        mgr._sync_sharing(session_dir, share=True)  # adopt
+
+        config = _session_config(session_dir)
+        config["mcpServers"]["mine"] = LOCAL_MCP
+        (session_dir / ".claude.json").write_text(json.dumps(config))
+        mgr._sync_sharing(session_dir, share=True)
+
+        assert _session_config(session_dir)["mcpServers"] == {"github": GITHUB_MCP}
+        # Post-adoption resets are documented behavior, never stashed.
+        assert not (session_dir / MCP_DISPLACED_STASH).exists()
+
+    def test_migration_stashes_displaced_only(self, mcp_setup, capsys):
+        default_config, session_dir, mgr = mcp_setup
+        config = _session_config(session_dir)
+        config["mcpServers"] = {"pre-feature": LOCAL_MCP, "github": GITHUB_MCP}
+        (session_dir / ".claude.json").write_text(json.dumps(config))
+
+        mgr._sync_sharing(session_dir, share=True)
+
+        assert _session_config(session_dir)["mcpServers"] == {"github": GITHUB_MCP}
+        stash = json.loads((session_dir / MCP_DISPLACED_STASH).read_text())
+        # Only the displaced entry — github matched the default and is not
+        # duplicated into the stash.
+        assert stash == {"schemaVersion": 1, "mcpServers": {"pre-feature": LOCAL_MCP}}
+        assert "saved to" in capsys.readouterr().out
+        assert (session_dir / MCP_MIRROR_MARKER).exists()
+
+    def test_stash_is_write_once(self, mcp_setup):
+        """A stash from an interrupted adoption is never overwritten."""
+        default_config, session_dir, mgr = mcp_setup
+        stash_path = session_dir / MCP_DISPLACED_STASH
+        original = {"schemaVersion": 1, "mcpServers": {"real-pre-feature": {}}}
+        stash_path.write_text(json.dumps(original))
+        config = _session_config(session_dir)
+        config["mcpServers"] = {"drift": {}}  # would look displaced
+        (session_dir / ".claude.json").write_text(json.dumps(config))
+
+        mgr._sync_sharing(session_dir, share=True)
+
+        assert _session_config(session_dir)["mcpServers"] == {"github": GITHUB_MCP}
+        assert json.loads(stash_path.read_text()) == original
+
+    def test_invalid_stash_blocks_reset(self, mcp_setup):
+        """A squatter on the stash name must not count as a saved copy."""
+        default_config, session_dir, mgr = mcp_setup
+        (session_dir / MCP_DISPLACED_STASH).mkdir()  # directory, not a stash
+        config = _session_config(session_dir)
+        config["mcpServers"] = {"pre-feature": LOCAL_MCP}
+        (session_dir / ".claude.json").write_text(json.dumps(config))
+
+        mgr._sync_sharing(session_dir, share=True)
+
+        assert _session_config(session_dir)["mcpServers"] == {
+            "pre-feature": LOCAL_MCP
+        }
+        assert not (session_dir / MCP_MIRROR_MARKER).exists()
+
+    def test_null_valued_entry_is_stashed(self, mcp_setup):
+        """Membership check: a JSON-null entry absent upstream still stashes."""
+        default_config, session_dir, mgr = mcp_setup
+        config = _session_config(session_dir)
+        config["mcpServers"] = {"weird": None, "github": GITHUB_MCP}
+        (session_dir / ".claude.json").write_text(json.dumps(config))
+
+        mgr._sync_sharing(session_dir, share=True)
+
+        stash = json.loads((session_dir / MCP_DISPLACED_STASH).read_text())
+        assert stash["mcpServers"] == {"weird": None}
+        assert _session_config(session_dir)["mcpServers"] == {"github": GITHUB_MCP}
+
+    def test_stash_failure_aborts_reset(self, mcp_setup, monkeypatch):
+        default_config, session_dir, mgr = mcp_setup
+        config = _session_config(session_dir)
+        config["mcpServers"] = {"pre-feature": LOCAL_MCP}
+        (session_dir / ".claude.json").write_text(json.dumps(config))
+        real_write = session_mod.atomic_write_json
+
+        def flaky(path, data):
+            if path.name == MCP_DISPLACED_STASH:
+                raise OSError("disk full")
+            real_write(path, data)
+
+        monkeypatch.setattr(session_mod, "atomic_write_json", flaky)
+        mgr._sync_sharing(session_dir, share=True)
+
+        assert _session_config(session_dir)["mcpServers"] == {
+            "pre-feature": LOCAL_MCP
+        }
+        assert not (session_dir / MCP_MIRROR_MARKER).exists()
+
+    def test_in_sync_first_run_adopts_without_write(self, mcp_setup):
+        default_config, session_dir, mgr = mcp_setup
+        config_path = session_dir / ".claude.json"
+        config = _session_config(session_dir)
+        config["mcpServers"] = {"github": GITHUB_MCP}
+        config_path.write_text(json.dumps(config))
+        before = config_path.read_bytes()
+
+        mgr._sync_sharing(session_dir, share=True)
+
+        assert config_path.read_bytes() == before  # no rewrite
+        assert not (config_path.parent / ".claude.json.lock").exists()  # released
+        assert (session_dir / MCP_MIRROR_MARKER).exists()
+
+    def test_adopted_in_sync_run_takes_no_lock(self, mcp_setup, monkeypatch):
+        """The steady state must stay lock-free (only first adoption locks)."""
+        default_config, session_dir, mgr = mcp_setup
+        mgr._sync_sharing(session_dir, share=True)  # adopt + mirror
+
+        def boom(*args, **kwargs):
+            raise AssertionError("lock taken on the adopted in-sync path")
+
+        monkeypatch.setattr(session_mod, "proper_lockfile", boom)
+        mgr._sync_sharing(session_dir, share=True)  # must not raise
+
+    @pytest.mark.parametrize(
+        "source_state",
+        ["missing", "corrupt", "non_dict_root", "non_dict_key", "binary"],
+    )
+    def test_fail_open_on_bad_source(self, mcp_setup, source_state):
+        default_config, session_dir, mgr = mcp_setup
+        if source_state == "missing":
+            default_config.unlink()
+        elif source_state == "corrupt":
+            default_config.write_text("{not json")
+        elif source_state == "non_dict_root":
+            default_config.write_text("[]")
+        elif source_state == "non_dict_key":
+            default_config.write_text(json.dumps({"mcpServers": ["bad"]}))
+        else:
+            default_config.write_bytes(b"\xff\xfe not utf-8 \x00")
+        before = (session_dir / ".claude.json").read_bytes()
+
+        mgr._sync_sharing(session_dir, share=True)
+
+        assert (session_dir / ".claude.json").read_bytes() == before
+        assert not (session_dir / MCP_MIRROR_MARKER).exists()
+
+    @pytest.mark.parametrize("bad_value", ["null", "[]", '"a-string"'])
+    def test_fail_open_on_bad_target_mcp(self, mcp_setup, bad_value):
+        """A malformed profile mcpServers must skip, never crash the launch."""
+        default_config, session_dir, mgr = mcp_setup
+        config = _session_config(session_dir)
+        config["mcpServers"] = json.loads(bad_value)
+        (session_dir / ".claude.json").write_text(json.dumps(config))
+        before = (session_dir / ".claude.json").read_bytes()
+
+        mgr._sync_sharing(session_dir, share=True)
+
+        assert (session_dir / ".claude.json").read_bytes() == before
+        assert not (session_dir / MCP_MIRROR_MARKER).exists()
+
+    def test_corrupt_session_config_skipped(self, mcp_setup):
+        default_config, session_dir, mgr = mcp_setup
+        (session_dir / ".claude.json").write_text("{broken")
+
+        mgr._sync_sharing(session_dir, share=True)
+
+        assert (session_dir / ".claude.json").read_text() == "{broken"
+        assert not (session_dir / MCP_MIRROR_MARKER).exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlink target check")
+    def test_symlinked_session_config_skipped(self, mcp_setup, temp_home):
+        default_config, session_dir, mgr = mcp_setup
+        elsewhere = temp_home / "elsewhere.json"
+        (session_dir / ".claude.json").rename(elsewhere)
+        (session_dir / ".claude.json").symlink_to(elsewhere)
+        before = elsewhere.read_bytes()
+
+        mgr._sync_sharing(session_dir, share=True)
+
+        assert (session_dir / ".claude.json").is_symlink()
+        assert elsewhere.read_bytes() == before
+
+    def test_held_lock_fails_open(self, mcp_setup, monkeypatch):
+        from claude_swap import claude_locks
+
+        monkeypatch.setattr(claude_locks, "DEFAULT_TIMEOUT_S", 0.3)
+        default_config, session_dir, mgr = mcp_setup
+        (session_dir / ".claude.json.lock").mkdir()  # fresh mtime: live holder
+        before = (session_dir / ".claude.json").read_bytes()
+
+        mgr._sync_sharing(session_dir, share=True)
+
+        assert (session_dir / ".claude.json").read_bytes() == before
+
+    def test_no_share_before_adoption_untouched(self, mcp_setup):
+        default_config, session_dir, mgr = mcp_setup
+        config = _session_config(session_dir)
+        config["mcpServers"] = {"pre-feature": LOCAL_MCP}
+        (session_dir / ".claude.json").write_text(json.dumps(config))
+
+        mgr._sync_sharing(session_dir, share=False)
+
+        assert _session_config(session_dir)["mcpServers"] == {
+            "pre-feature": LOCAL_MCP
+        }
+
+    def test_no_share_after_adoption_removes_then_restores(self, mcp_setup):
+        default_config, session_dir, mgr = mcp_setup
+        mgr._sync_sharing(session_dir, share=True)  # adopt
+
+        mgr._sync_sharing(session_dir, share=False)
+        config = _session_config(session_dir)
+        assert "mcpServers" not in config
+        assert config["oauthAccount"]["emailAddress"] == ACCOUNT_EMAIL
+        assert (session_dir / MCP_MIRROR_MARKER).exists()  # adoption is history
+
+        mgr._sync_sharing(session_dir, share=True)
+        assert _session_config(session_dir)["mcpServers"] == {"github": GITHUB_MCP}
+
+
+# ---------------------------------------------------------------------------
 # run() / exec handoff
 # ---------------------------------------------------------------------------
 
@@ -746,6 +1122,22 @@ class TestRun:
             manager.run("2", [])
 
         assert exc.value.env["ANTHROPIC_API_KEY"] == "sk-ant-key"
+
+    def test_exec_default_uses_plain_env(self, manager, capture_exec, monkeypatch):
+        """exec_default launches plain claude with the unmodified environment."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-key")
+        with pytest.raises(_ExecCalled) as exc:
+            manager.exec_default(["--resume"])
+
+        assert exc.value.binary == "/fake/bin/claude"
+        assert exc.value.argv == ["/fake/bin/claude", "--resume"]
+        # Plain claude behavior: API key is NOT scrubbed (unlike session mode).
+        assert exc.value.env["ANTHROPIC_API_KEY"] == "sk-ant-key"
+
+    def test_exec_default_claude_not_on_path(self, manager, monkeypatch):
+        monkeypatch.setattr(session_mod.shutil, "which", lambda name: None)
+        with pytest.raises(SessionError, match="not found on PATH"):
+            manager.exec_default([])
 
 
 class TestExec:
@@ -1182,6 +1574,15 @@ class TestReadSessionCredentials:
             '{"claudeAiOauth": {"accessToken": "sk-file"}}'
         )
         assert "sk-file" in session_mod.read_session_credentials(session_dir)
+
+    def test_byte_corrupt_file_returns_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            Platform, "detect", classmethod(lambda cls: Platform.LINUX)
+        )
+        session_dir = tmp_path / "sess"
+        session_dir.mkdir()
+        (session_dir / ".credentials.json").write_bytes(b"\xff\xfe\x00corrupt")
+        assert session_mod.read_session_credentials(session_dir) is None
 
     def test_keychain_shadows_plaintext_on_macos(
         self, tmp_path, macos_platform, block_real_keychain

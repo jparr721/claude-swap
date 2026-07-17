@@ -15,7 +15,7 @@ import typer
 from claude_swap import __version__, render
 from claude_swap.exceptions import ClaudeSwitchError, ConfigError
 from claude_swap.json_output import error_envelope, provider_envelope
-from claude_swap.printer import dimmed, error, force_utf8_output, muted
+from claude_swap.printer import accent, dimmed, error, force_utf8_output, muted, warning
 from claude_swap.process_detection import get_running_instances
 from claude_swap.providers.registry import (
     get_provider,
@@ -469,11 +469,14 @@ def claude_add(
     slot: int | None = typer.Option(
         None, "--slot", metavar="NUM", help="Store in a specific slot"
     ),
+    alias: str | None = typer.Option(
+        None, "--alias", metavar="NAME", help="Set a short account alias"
+    ),
     debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
 ) -> None:
     """Add the currently logged-in Claude account."""
     _dispatch(
-        lambda: _init_switcher(debug).add_account(slot=slot),
+        lambda: _init_switcher(debug).add_account(slot=slot, alias=alias),
         json_mode=False,
         update_check=True,
     )
@@ -517,6 +520,12 @@ def claude_switch(
             "quota headroom; 'next-available' rotates, skipping exhausted accounts"
         ),
     ),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        metavar="NAMES",
+        help="Use named per-model weekly limits with a usage-aware strategy",
+    ),
     force: bool = typer.Option(
         False,
         "--force",
@@ -533,16 +542,32 @@ def claude_switch(
     resolved = target if target is not None else to
     if strategy is not None and resolved is not None:
         raise typer.BadParameter("--strategy can only be used with bare 'switch'")
+    if model is not None and strategy is None:
+        raise typer.BadParameter("--model requires --strategy")
     if force and resolved is None:
         raise typer.BadParameter("--force requires a target")
 
     def action() -> dict | None:
         switcher = _init_switcher(debug)
         if resolved is None:
+            from claude_swap.settings import load_settings, parse_model_names
+
+            if strategy is None:
+                models, model_source = (), None
+            elif model is not None:
+                models, model_source = parse_model_names(model), "cli"
+            else:
+                models = parse_model_names(load_settings(switcher.backup_dir).model)
+                model_source = "autoswitch.model" if models else None
             result = switcher.switch(
                 strategy=strategy.value if strategy is not None else None,
                 json_output=json_output,
+                models=models,
+                model_source=model_source,
             )
+            if result is not None and models:
+                result["models"] = list(models)
+                result["modelSource"] = model_source
         else:
             result = switcher.switch_to(resolved, json_output=json_output, force=force)
         if not json_output:
@@ -569,6 +594,67 @@ def claude_remove(
         json_mode=False,
         update_check=True,
     )
+
+
+@claude_app.command("disable")
+def claude_disable(
+    identifier: str = typer.Argument(..., metavar="NUM|EMAIL|ALIAS"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Hold a Claude account out of automatic rotation."""
+    _dispatch(
+        lambda: _init_switcher(debug).set_account_disabled(identifier, True),
+        json_mode=False,
+        update_check=True,
+    )
+
+
+@claude_app.command("enable")
+def claude_enable(
+    identifier: str = typer.Argument(..., metavar="NUM|EMAIL|ALIAS"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Return a Claude account to automatic rotation."""
+    _dispatch(
+        lambda: _init_switcher(debug).set_account_disabled(identifier, False),
+        json_mode=False,
+        update_check=True,
+    )
+
+
+@claude_app.command("alias")
+def claude_alias(
+    account: str | None = typer.Argument(None, metavar="[NUM|EMAIL|ALIAS]"),
+    alias_name: str | None = typer.Argument(None, metavar="[NAME]"),
+    unset: bool = typer.Option(False, "--unset", help="Remove the account alias"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Set, remove, or list Claude account aliases."""
+    if unset and alias_name is not None:
+        raise typer.BadParameter("--unset does not take a NAME argument")
+    if unset and account is None:
+        raise typer.BadParameter("NUM|EMAIL|ALIAS is required with --unset")
+    if account is not None and not unset and alias_name is None:
+        raise typer.BadParameter("NAME is required unless --unset is passed")
+
+    def action() -> None:
+        switcher = _init_switcher(debug)
+        if account is None:
+            rows = switcher.list_aliases()
+            if not rows:
+                print(dimmed("No aliases set"))
+                return
+            for number, alias, email in rows:
+                print(f"{number}: {alias} {muted(f'({email})')}")
+            return
+        if unset:
+            number = switcher.unset_alias(account)
+            print(f"{accent('Removed alias')} for Account {number}")
+            return
+        number, normalized = switcher.set_alias(account, alias_name or "")
+        print(f"{accent('Set alias')} '{normalized}' for Account {number}")
+
+    _dispatch(action, json_mode=False, update_check=True)
 
 
 @claude_app.command("export")
@@ -608,9 +694,106 @@ def claude_import(
     _dispatch(action, json_mode=False, update_check=True)
 
 
+@claude_app.command("map")
+def claude_map(
+    account: str | None = typer.Argument(None, metavar="[NUM|EMAIL|ALIAS]"),
+    path: str | None = typer.Argument(None, metavar="[PATH]"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Map a directory to a Claude account for `claude run`."""
+
+    def action() -> None:
+        switcher = _init_switcher(debug)
+        if account is None:
+            switcher.list_mappings()
+            return
+        from claude_swap.mappings import MappingStore, normalize_path
+
+        account_num, email, org_uuid = switcher.resolve_account(account)
+        target = path or os.getcwd()
+        if not os.path.isdir(target):
+            warning(f"{target} is not an existing directory (mapping it anyway)")
+        store = MappingStore(switcher.backup_dir)
+        previous = store.get(target)
+        store.set(target, email, org_uuid)
+        shown = normalize_path(target)
+        if previous and previous.get("email") != email:
+            previous_email = str(previous.get("email", ""))
+            print(
+                f"{accent('Mapped')} {shown} to Account-{account_num} ({email}) "
+                f"{muted(f'(was {previous_email})')}"
+            )
+        else:
+            print(f"{accent('Mapped')} {shown} to Account-{account_num} ({email})")
+
+    _dispatch(action, json_mode=False, update_check=True)
+
+
+@claude_app.command("unmap")
+def claude_unmap(
+    path: str | None = typer.Argument(None, metavar="[PATH]"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Remove a directory-to-account mapping."""
+
+    def action() -> None:
+        from claude_swap.mappings import MappingStore, normalize_path
+
+        switcher = _init_switcher(debug)
+        target = path or os.getcwd()
+        shown = normalize_path(target)
+        if MappingStore(switcher.backup_dir).remove(target):
+            print(f"{accent('Unmapped')} {shown}")
+        else:
+            print(dimmed(f"No mapping for {shown}"))
+
+    _dispatch(action, json_mode=False, update_check=True)
+
+
+@claude_app.command("swap")
+def claude_swap_accounts(
+    first: str = typer.Argument(..., metavar="NUM|EMAIL|ALIAS"),
+    second: str = typer.Argument(..., metavar="NUM|EMAIL|ALIAS"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Exchange two Claude accounts' slot numbers."""
+
+    def action() -> None:
+        switcher = _init_switcher(debug)
+        first_slot, second_slot = switcher.swap_accounts(first, second)
+        print(f"{accent('Swapped')} Account {first_slot} and Account {second_slot}")
+
+    _dispatch(action, json_mode=False, update_check=True)
+
+
+@claude_app.command("move")
+def claude_move(
+    account: str = typer.Argument(..., metavar="NUM|EMAIL|ALIAS"),
+    slot: str = typer.Argument(..., metavar="SLOT"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Move a Claude account to a slot, swapping if the slot is occupied."""
+
+    def action() -> None:
+        switcher = _init_switcher(debug)
+        source, target, swapped = switcher.move_account(account, slot)
+        if source == target:
+            print(dimmed(f"Already in slot {target}"))
+        elif swapped:
+            print(f"{accent('Swapped')} Account {source} and Account {target}")
+        else:
+            print(f"{accent('Moved')} Account {source} to slot {target}")
+
+    _dispatch(action, json_mode=False, update_check=True)
+
+
 @claude_app.command("run")
 def claude_run(
-    account: str = typer.Argument(..., metavar="NUM|EMAIL", help="Account to run"),
+    account: str | None = typer.Argument(
+        None,
+        metavar="[NUM|EMAIL|ALIAS]",
+        help="Account to run, or omit to use the current directory mapping",
+    ),
     claude_args: list[str] | None = typer.Argument(
         None,
         metavar="[-- CLAUDE_ARGS...]",
@@ -643,12 +826,32 @@ def claude_run(
         switcher = _init_switcher(debug)
         from claude_swap.session import SessionManager
 
-        SessionManager(switcher).run(
-            account,
-            list(claude_args or []),
-            share=not no_share,
-            share_history=share_history,
-        )
+        manager = SessionManager(switcher)
+        args = list(claude_args or [])
+        if account is not None:
+            manager.run(
+                account,
+                args,
+                share=not no_share,
+                share_history=share_history,
+            )
+            return
+        slot, email = switcher.slot_for_directory(os.getcwd())
+        if slot is not None:
+            manager.run(
+                slot,
+                args,
+                share=not no_share,
+                share_history=share_history,
+            )
+            return
+        if email is not None:
+            warning(
+                f"Mapped account {email} no longer exists - launching the default account"
+            )
+        else:
+            print(dimmed(f"No account mapped for {os.getcwd()} - launching the default account"))
+        manager.exec_default(args)
 
     _dispatch(action, json_mode=False, update_check=False)
 
@@ -672,6 +875,12 @@ def claude_auto(
     ),
     cooldown: float | None = typer.Option(
         None, "--cooldown", metavar="SECONDS", help="Minimum time between proactive switches (default 300)"
+    ),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        metavar="NAMES",
+        help="Also switch on named per-model weekly limits (comma-separated or 'all')",
     ),
     include_api_key_accounts: bool | None = typer.Option(
         None,
@@ -715,6 +924,7 @@ def claude_auto(
             threshold=threshold,
             interval=interval,
             cooldown=cooldown,
+            model=model,
             include_api_key_accounts=include_api_key_accounts,
         )
         settings = merged_with_cli(load_settings(switcher.backup_dir), overrides)

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import NamedTuple, Protocol
 
 from claude_swap import macos_keychain
-from claude_swap.exceptions import CredentialWriteError
+from claude_swap.exceptions import CredentialError, CredentialWriteError
 from claude_swap.models import Platform
 from claude_swap.paths import (
     get_claude_config_home,
@@ -62,8 +62,8 @@ _ACTIVE_READ_ATTEMPTS = 2
 _ACTIVE_READ_RETRY_DELAY = 0.3  # seconds between attempts
 
 # After a Keychain failure the store drops to file mode so one CLI invocation
-# can't split-brain between backends. A long-running daemon (menu bar / TUI)
-# instead re-probes this long after the last failure: far longer than any CLI
+# can't split-brain between backends. A long-running process instead re-probes
+# this long after the last failure: far longer than any CLI
 # command runs (so the guarantee holds — a sub-second command never re-probes),
 # short enough that a transient `security` timeout self-heals within a minute
 # instead of disabling the Keychain for the whole process lifetime.
@@ -681,6 +681,14 @@ class CredentialStore:
             self._backup_username(account_num, email),
         )
 
+    def _kc_delete_backup_prev(self, account_num: str, email: str) -> None:
+        """Delete a slot's retained ``.prev`` Keychain item. Raises on failure."""
+        self._kc_call(
+            macos_keychain.delete_password,
+            SECURITY_SERVICE,
+            self._prev_backup_username(account_num, email),
+        )
+
     def _delete_backup_keychain_quiet(self, account_num: str, email: str) -> None:
         """Best-effort backup Keychain delete (never raises)."""
         try:
@@ -690,8 +698,12 @@ class CredentialStore:
 
     def _write_backup_enc(self, account_num: str, email: str, credentials: str) -> None:
         """Atomically write a per-account backup ``.enc`` (base64) file."""
+        self._atomic_b64_write(self._backup_enc_path(account_num, email), credentials)
+
+    def _atomic_b64_write(self, target: Path, credentials: str) -> None:
+        """Atomically write a base64-encoded credential file (0600)."""
         self._host.credentials_dir.mkdir(parents=True, exist_ok=True)
-        enc_file = self._backup_enc_path(account_num, email)
+        enc_file = target
         encoded = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
         import tempfile
         fd, tmp_path = tempfile.mkstemp(dir=str(self._host.credentials_dir), suffix=".tmp")
@@ -741,7 +753,17 @@ class CredentialStore:
         Linux/WSL/Windows read the ``.enc`` only.
         """
         enc_file = self._backup_enc_path(account_num, email)
-        if enc_file.exists():
+        try:
+            # Python 3.12's Path.exists() raises on an unsearchable directory
+            # where 3.13+ returns False — normalize to "missing" so every
+            # version takes the same best-effort path. Failing closed on
+            # unreadable stores is the strict pre-commit clear's job, not the
+            # reader's.
+            enc_present = enc_file.exists()
+        except OSError as e:
+            self._host._logger.warning(f"Failed to read credentials file: {e}")
+            enc_present = False
+        if enc_present:
             try:
                 encoded = enc_file.read_text(encoding="utf-8").strip()
                 # validate=True: reject non-alphabet junk (e.g. "!!!!") instead of
@@ -775,7 +797,13 @@ class CredentialStore:
 
         Raises on a file-write failure **before** returning, so the switcher wrapper
         runs ``_post_backup_write`` exactly once and only after a successful write.
+
+        Before overwriting, the current generation is retained as a ``.prev`` file
+        (one generation, best-effort): a refresh token exists in exactly one place,
+        giving a misclassified overwrite a best-effort chance of recovery without
+        a /login.
         """
+        self._retain_previous_backup(account_num, email, credentials)
         if self._use_keychain():
             try:
                 self._kc_write_backup(account_num, email, credentials)
@@ -820,3 +848,244 @@ class CredentialStore:
                 self._host._logger.warning(f"Failed to delete credentials file: {e}")
             if self._host.platform == Platform.MACOS:
                 self._delete_backup_keychain_quiet(num, email)
+            self.delete_previous_backup(num, email)
+
+    def delete_account_credentials_strict(
+        self, account_num: str, email: str
+    ) -> None:
+        """Clear a slot key, failing closed: raise unless emptiness is assured.
+
+        For transactional pre-commit clears (the swap/move write-or-clear
+        step and rollback restoration): a destination that must be empty but
+        may still serve material is exactly the wrong-credential state the
+        transaction exists to prevent, so backend failures must abort the
+        commit rather than be logged away. A read-back alone cannot provide
+        this: the normal reader converts Keychain errors to ``""``, which
+        conflates "absent" with "unreadable" — a locked Keychain holding a
+        stale item would pass verification and resurface on unlock. So the
+        served backends are deleted with errors propagating; absence itself
+        counts as success on both (missing ``.enc``; Keychain rc 44). The
+        Keychain delete runs even when routing says file mode, for the same
+        reason. Legacy-alias and ``.prev`` sweeps stay best-effort — reads
+        never serve them. The best-effort variant remains right for
+        post-commit cleanup, where a failure only leaks an unreferenced file.
+        """
+        # Best-effort sweep first: same cruft cleanup (legacy alias, .prev,
+        # quiet Keychain) a normal delete performs.
+        self._delete_account_credentials(account_num, email)
+        # Then assure the served key really is gone, propagating failures.
+        # Unconditional unlink: exists() returns False on an inaccessible
+        # directory, which would fail open here — missing is fine
+        # (missing_ok), permission/I/O errors must abort the commit.
+        try:
+            self._backup_enc_path(account_num, email).unlink(missing_ok=True)
+            if self._host.platform == Platform.MACOS:
+                self._kc_delete_backup(account_num, email)
+        except (OSError, *macos_keychain.KEYCHAIN_ERRORS) as e:
+            raise CredentialError(
+                f"Could not clear stored credentials for slot {account_num} "
+                f"({email}) - aborting before commit: {e}"
+            ) from e
+        # Final belt: catches any backend view the deletes above missed.
+        if self._read_account_credentials(account_num, email):
+            raise CredentialError(
+                f"Could not clear stored credentials for slot {account_num} "
+                f"({email}) - aborting before commit"
+            )
+
+    def delete_previous_backup(self, account_num: str, email: str) -> None:
+        """Drop a slot key's retained ``.prev`` generation (both backends).
+
+        Best-effort, like retention itself. Called from full-key deletion,
+        and on its own when a key's history stops belonging to its account —
+        a renumber (swap/move) writes another account's material through the
+        key, and recovery must never resurrect the displaced generation onto
+        the key's new owner.
+        """
+        prev_file = self._prev_backup_path(account_num, email)
+        try:
+            if prev_file.exists():
+                prev_file.unlink()
+        except Exception as e:
+            self._host._logger.warning(f"Failed to delete .prev file: {e}")
+        if self._host.platform == Platform.MACOS:
+            try:
+                self._kc_delete_backup_prev(account_num, email)
+            except Exception as e:
+                self._host._logger.warning(
+                    f"Failed to delete .prev from Keychain: {e}"
+                )
+
+    # -- previous-generation retention -------------------------------------
+    #
+    # One retained generation per slot, routed by the same rule as the backup
+    # itself: Keychain when the Keychain is in use, ``.enc.prev`` file
+    # otherwise. Retention must not *weaken* the user's storage posture — a
+    # Mac whose credentials live in the Keychain must not grow a plaintext
+    # copy just for recovery. Best-effort by design: the *primary* safety
+    # boundary is the switch-time provenance check + unclaimed stash (whose
+    # failure aborts); ``.prev`` is defense in depth for writes that were
+    # classified as safe but weren't.
+
+    def _prev_backup_path(self, account_num: str, email: str) -> Path:
+        return self._host.credentials_dir / f".creds-{account_num}-{email}.enc.prev"
+
+    def _prev_backup_username(self, account_num: str, email: str) -> str:
+        return f"{self._backup_username(account_num, email)}.prev"
+
+    def _retain_previous_backup(
+        self, account_num: str, email: str, new_credentials: str
+    ) -> None:
+        """Retain the slot's current backup as ``.prev`` before it is replaced."""
+        try:
+            current = self._read_account_credentials(account_num, email)
+        except Exception as e:  # pragma: no cover - _read swallows its own errors
+            self._host._logger.warning(f"Could not read backup for retention: {e}")
+            return
+        if not current or current == new_credentials:
+            return
+        try:
+            if self._use_keychain():
+                self._kc_call(
+                    macos_keychain.set_password,
+                    SECURITY_SERVICE,
+                    self._prev_backup_username(account_num, email),
+                    current,
+                )
+            else:
+                self._atomic_b64_write(
+                    self._prev_backup_path(account_num, email), current
+                )
+        except Exception as e:
+            self._host._logger.warning(
+                f"Failed to retain previous credential generation for "
+                f"account {account_num}: {e}"
+            )
+
+    def _read_previous_backup(self, account_num: str, email: str) -> str:
+        """Read the retained previous generation. ``""`` when absent/corrupt.
+
+        ``.enc.prev``-wins like the main backup read: a file written while the
+        Keychain was unusable beats a possibly-stale Keychain copy.
+        """
+        prev_file = self._prev_backup_path(account_num, email)
+        if prev_file.exists():
+            try:
+                encoded = prev_file.read_text(encoding="utf-8").strip()
+                decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+                if decoded:
+                    return decoded
+            except Exception as e:
+                self._host._logger.warning(f"Failed to read .prev file: {e}")
+        if self._host.platform == Platform.MACOS:
+            try:
+                return self._kc_call(
+                    macos_keychain.get_password,
+                    SECURITY_SERVICE,
+                    self._prev_backup_username(account_num, email),
+                ) or ""
+            except macos_keychain.KEYCHAIN_ERRORS as e:
+                self._host._logger.warning(f"Failed to read .prev from Keychain: {e}")
+        return ""
+
+    # -- internal safety copies (unclaimed credentials) ----------------------
+    #
+    # Write-only preservation for live credential bytes a switch positively
+    # attributed to someone other than the outgoing slot (invariant: never
+    # overwrite the live store without preserving what was in it — the bytes
+    # may be the only live copy of some account's refresh token). Entries are
+    # append-only base64 files with a JSON manifest carrying the
+    # classification evidence; nothing consumes them automatically — recovery
+    # is the documented /login + `cswap add [--slot N]`, and these files are
+    # forensic material for maintainers.
+    #
+    # Deliberately 0600 files on every platform, unlike the slot backups and
+    # ``.prev``, which route to the macOS Keychain when it is in use: a failed
+    # safety-copy write aborts the switch by design, and that abort path must
+    # not inherit the Keychain's failure modes (#101/#106 — a flaky Keychain
+    # would start blocking switches). On macOS this means these rare files
+    # sit outside the Keychain, base64-encoded with owner-only permissions.
+
+    def _stash_manifest_path(self) -> Path:
+        return self._host.credentials_dir / ".unclaimed-manifest.json"
+
+    def _stash_entry_path(self, entry_id: str) -> Path:
+        return self._host.credentials_dir / f".unclaimed-{entry_id}.enc"
+
+    def _read_stash_manifest(self) -> dict:
+        path = self._stash_manifest_path()
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            entries = data.get("entries")
+            return entries if isinstance(entries, dict) else {}
+        except Exception as e:
+            self._host._logger.warning(f"Failed to read unclaimed manifest: {e}")
+            return {}
+
+    def _write_stash_manifest(self, entries: dict) -> None:
+        from claude_swap.settings import atomic_write_json
+
+        self._host.credentials_dir.mkdir(parents=True, exist_ok=True)
+        path = self._stash_manifest_path()
+        # A corrupt manifest read as {} must not be silently clobbered — the
+        # rows are classification evidence. Set it aside (the entry *bytes*
+        # are separate files and keep being listed as orphans either way).
+        # Failing closed instead would brick switching: a stash-write failure
+        # aborts the switch by design.
+        if path.exists():
+            try:
+                json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                aside = path.with_name(
+                    f"{path.name}.corrupt-{int(time.time())}"
+                )
+                try:
+                    path.rename(aside)
+                    self._host._logger.warning(
+                        f"Unreadable unclaimed manifest preserved as {aside.name}"
+                    )
+                except OSError as e:
+                    self._host._logger.warning(
+                        f"Could not preserve corrupt unclaimed manifest: {e}"
+                    )
+        atomic_write_json(path, {"schemaVersion": 1, "entries": entries})
+
+    def _write_unclaimed_credential(self, credentials: str, context: dict) -> str:
+        """Stash a credential of unknown provenance. Returns the entry id.
+
+        Raises on any failure — callers use a successful stash as the license
+        to overwrite the live store, so a failed one must be loud. The entry
+        file is written before the manifest: an entry without manifest metadata
+        is recoverable; a manifest row without bytes is not.
+        """
+        import hashlib
+        import secrets
+        from datetime import datetime, timezone
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        digest = hashlib.sha256(credentials.encode("utf-8")).hexdigest()[:12]
+        # Nonce keeps ids unique even for identical bytes preserved in the
+        # same second — append-only means no write may ever land on an
+        # existing id.
+        entry_id = f"{ts}-{digest}-{secrets.token_hex(3)}"
+        self._atomic_b64_write(self._stash_entry_path(entry_id), credentials)
+        entries = self._read_stash_manifest()
+        entries[entry_id] = {
+            "createdAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            **context,
+        }
+        self._write_stash_manifest(entries)
+        return entry_id
+
+    def _list_unclaimed_credentials(self) -> dict[str, dict]:
+        """Manifest entries by id, including orphaned entry files (no metadata)."""
+        entries = dict(self._read_stash_manifest())
+        try:
+            for path in self._host.credentials_dir.glob(".unclaimed-*.enc"):
+                entry_id = path.name[len(".unclaimed-"):-len(".enc")]
+                entries.setdefault(entry_id, {"createdAt": None})
+        except OSError:
+            pass
+        return entries

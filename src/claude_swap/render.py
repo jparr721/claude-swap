@@ -176,12 +176,18 @@ def provider_usage_cell(entry: UsageEntry, relogin_hint: str) -> RenderableType:
     return Group(*parts)
 
 
-def _account_text(name: str, tag: str, is_active: bool) -> Text:
-    text = Text(name)
+def _account_text(
+    name: str, tag: str, is_active: bool, alias: str = "", disabled: bool = False
+) -> Text:
+    text = Text(alias) if alias else Text(name)
+    if alias:
+        text.append(f" ({name})", style=_MUTED)
     if tag:
         text.append(f" [{tag}]", style=_MUTED)
     if is_active:
         text.append(" *", style=_BOLD_ACCENT)
+    if disabled:
+        text.append(" (disabled)", style="dim")
     return text
 
 
@@ -194,7 +200,13 @@ def claude_accounts_table(data: ClaudeListData) -> Table:
         cell: RenderableType = claude_usage_cell(row.usage)
         if row.token_status:
             cell = Group(cell, Text(row.token_status, style="dim"))
-        table.add_row(row.number, _account_text(row.email, row.tag, row.is_active), cell)
+        table.add_row(
+            row.number,
+            _account_text(
+                row.email, row.tag, row.is_active, row.alias, row.disabled
+            ),
+            cell,
+        )
     return table
 
 

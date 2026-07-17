@@ -21,7 +21,7 @@ from claude_swap.exceptions import (
     CredentialReadError,
     TransferError,
 )
-from claude_swap.models import Platform, get_timestamp
+from claude_swap.models import Platform, get_timestamp, normalize_alias
 
 if TYPE_CHECKING:
     from claude_swap.switcher import ClaudeAccountSwitcher
@@ -77,12 +77,19 @@ def _validate_imported_account(switcher: ClaudeAccountSwitcher, account: dict) -
     # Org/uuid/added must be strings (or absent). A list/dict here would
     # otherwise blow up downstream (unhashable in seen_keys, broken composite
     # key matching, garbage in sequence.json).
-    for field in ("organizationUuid", "organizationName", "uuid", "added"):
+    for field in ("organizationUuid", "organizationName", "uuid", "added", "alias"):
         if field in account and account[field] is not None:
             if not isinstance(account[field], str):
                 raise TransferError(
                     f"{field} for {email} must be a string, got {type(account[field]).__name__}"
                 )
+
+    alias = account.get("alias")
+    if isinstance(alias, str):
+        try:
+            normalize_alias(alias)
+        except ValueError as e:
+            raise TransferError(f"invalid alias for {email}: {e}") from e
 
     return email, str(raw_number)
 
@@ -109,7 +116,7 @@ def _slim_config(config_obj: dict, label: str) -> dict:
     oauth = config_obj.get("oauthAccount")
     if not isinstance(oauth, dict):
         raise TransferError(
-            f"{label} is missing oauthAccount — cannot export"
+            f"{label} is missing oauthAccount - cannot export"
         )
     return {"oauthAccount": oauth}
 
@@ -135,7 +142,7 @@ def export_accounts(
     """
     sequence_data = switcher._get_sequence_data_migrated()
     if not sequence_data or not sequence_data.get("accounts"):
-        raise TransferError("no accounts to export — run cswap claude add first")
+        raise TransferError("no accounts to export - run cswap claude add first")
 
     accounts_map = sequence_data["accounts"]
 
@@ -191,7 +198,7 @@ def export_accounts(
                     )
                 _eprint(
                     f"Skipping Account-{num} ({email}): no stored "
-                    f"credentials/config — re-add with: "
+                    f"credentials/config - re-add with: "
                     f"cswap claude add --slot {num}"
                 )
                 continue
@@ -220,11 +227,13 @@ def export_accounts(
         }
         if is_api_key:
             entry["kind"] = "api_key"
+        if record.get("alias"):
+            entry["alias"] = record["alias"]
         accounts_payload.append(entry)
 
     if not accounts_payload:
         raise TransferError(
-            "no exportable accounts — all managed slots are missing stored "
+            "no exportable accounts - all managed slots are missing stored "
             "credentials/config. Re-add with: cswap claude add --slot <number>"
         )
 
@@ -271,6 +280,9 @@ def import_accounts(
         switcher: Initialized ClaudeAccountSwitcher.
         source: File path, or "-" for stdin.
         force: When True, overwrites the existing matching slot in place.
+            Without it, existing accounts are skipped — unless the slot is
+            quarantined as refresh-token-dead, which a plain import replaces
+            (auto-heal, issue #136).
 
     Raises:
         TransferError: malformed file, version mismatch, encrypted payload.
@@ -299,7 +311,7 @@ def import_accounts(
 
     if envelope.get("encrypted") is True:
         raise TransferError(
-            "encrypted exports are not supported in this version — "
+            "encrypted exports are not supported in this version - "
             "decrypt before piping (e.g. gpg -d backup.gpg | cswap claude import -)"
         )
 
@@ -309,8 +321,17 @@ def import_accounts(
 
     # Pass 1: validate every account before any writes. A malformed account
     # later in the list must not leave earlier accounts half-imported.
+    local_data = switcher._get_sequence_data_migrated() or {}
+    local_aliases: dict[str, tuple[str, str]] = {
+        (acc.get("alias") or "").lower(): (
+            acc.get("email", ""), acc.get("organizationUuid", "") or "",
+        )
+        for acc in local_data.get("accounts", {}).values()
+        if acc.get("alias")
+    }
     normalized: list[dict[str, Any]] = []
     seen_keys: set[tuple[str, str]] = set()
+    seen_aliases: set[str] = set()
     for raw in accounts:
         email, exported_num = _validate_imported_account(switcher, raw)
         org_uuid = raw.get("organizationUuid", "") or ""
@@ -324,7 +345,7 @@ def import_accounts(
         if is_api_key:
             if not (isinstance(creds_obj, str) and looks_like_api_key(creds_obj)):
                 raise TransferError(
-                    f"API-key credentials for {email} must be a raw sk-ant-api… string"
+                    f"API-key credentials for {email} must be a raw sk-ant-api string"
                 )
             creds_text = creds_obj.strip()
         else:
@@ -339,6 +360,23 @@ def import_accounts(
                 f"duplicate account in export: {email} (org={org_uuid or 'personal'})"
             )
         seen_keys.add(key)
+
+        alias = raw.get("alias") or None
+        if alias:
+            alias_key = normalize_alias(alias)  # already validated in pass-1 above
+            if alias_key in seen_aliases:
+                raise TransferError(f"duplicate alias in export: {alias_key}")
+            seen_aliases.add(alias_key)
+            owner = local_aliases.get(alias_key)
+            if owner is not None and owner != (email, org_uuid):
+                _eprint(
+                    f"Warning: alias '{alias_key}' for {email} already used by an "
+                    "existing account, dropping the imported alias"
+                )
+                alias = None
+            else:
+                alias = alias_key
+
         normalized.append(
             {
                 "email": email,
@@ -348,6 +386,7 @@ def import_accounts(
                 "uuid": raw.get("uuid", "") or "",
                 "added": raw.get("added") or get_timestamp(),
                 "kind": "api_key" if is_api_key else "oauth",
+                "alias": alias,
                 "creds_text": creds_text,
                 "config_text": json.dumps(config_obj, indent=2),
             }
@@ -361,6 +400,7 @@ def import_accounts(
     imported = 0
     skipped = 0
     overwritten = 0
+    replaced = 0
     written_slots: set[str] = set()
 
     # Track where the envelope's active account ended up locally. We can't
@@ -391,7 +431,25 @@ def import_accounts(
         )
 
         if existing_slot is not None:
-            if not force:
+            if force:
+                outcome = "overwrote"
+            elif (
+                switcher._usage_store.entries(
+                    {existing_slot: (entry["email"], entry["org_uuid"])}
+                )[existing_slot].token_dead()
+            ):
+                # Narrow auto-heal (issue #136): a plain import replaces a
+                # slot iff its identity-matched usage row is quarantined as
+                # refresh-token-dead. The verdict normally postdates the
+                # slot's last credential write, so the heal targets creds that
+                # failed after being stored (known exception and full
+                # trade-off: INVESTIGATION-import-dead-token.md). Identity-
+                # guarded — a stale row for a different account returns an
+                # empty entry — so healthy slots still require --force. Never
+                # triggered by the live store's "no credentials" state, which
+                # isn't attributable to the backup.
+                outcome = "replaced"
+            else:
                 _eprint(
                     f"Skipped {entry['email']} (already exists, use --force)"
                 )
@@ -402,7 +460,6 @@ def import_accounts(
                     resolved_active_slot = existing_slot
                 continue
             target_num = existing_slot
-            outcome = "overwrote"
             # The credential write below invalidates the slot's non-live
             # session profile (chokepoint in _write_account_credentials), so
             # the next `cswap run` re-bootstraps from the imported creds. A
@@ -428,6 +485,16 @@ def import_accounts(
         switcher._write_account_config(
             target_num, entry["email"], entry["config_text"]
         )
+        # Every successful import write introduces credential material whose
+        # previous auth verdict is no longer authoritative, so lift any
+        # dead-token quarantine on this slot (mirrors add_account / the
+        # add-token paths). This clears for both "imported" and "overwrote":
+        # account removal doesn't prune usage.json, so re-importing a removed
+        # identity into the same slot would otherwise stay quarantined and
+        # never re-fetch to prove the imported token — issue #138.
+        switcher._usage_store.clear_dead_token(
+            [target_num], {target_num: (entry["email"], entry["org_uuid"])}
+        )
 
         data.setdefault("accounts", {})
         data.setdefault("sequence", [])
@@ -440,6 +507,8 @@ def import_accounts(
         }
         if entry["kind"] == "api_key":
             new_record["kind"] = "api_key"
+        if entry.get("alias"):
+            new_record["alias"] = entry["alias"]
         data["accounts"][target_num] = new_record
         if int(target_num) not in data["sequence"]:
             data["sequence"].append(int(target_num))
@@ -454,8 +523,16 @@ def import_accounts(
         if outcome == "overwrote":
             _eprint(f"Overwrote {entry['email']} (slot {target_num})")
             overwritten += 1
+        elif outcome == "replaced":
+            # Describe the observed trigger (the quarantine verdict), not the
+            # token itself — a stale verdict can sit over newer working creds.
+            _eprint(
+                f"Replaced {entry['email']} (slot {target_num} was "
+                "quarantined: refresh token dead)"
+            )
+            replaced += 1
         else:
-            _eprint(f"Imported {entry['email']} → slot {target_num}")
+            _eprint(f"Imported {entry['email']} -> slot {target_num}")
             imported += 1
 
     # Migration UX: if the destination has no recorded active account
@@ -473,9 +550,15 @@ def import_accounts(
         final["lastUpdated"] = get_timestamp()
         switcher._write_json(switcher.sequence_file, final)
 
-    _eprint(
+    # "replaced" gets its own count — the user must be able to distinguish
+    # "I forced this" from "cswap healed this". Appended only when it
+    # happened, keeping the common-case summary stable.
+    summary = (
         f"Done: {imported} imported, {overwritten} overwritten, {skipped} skipped"
     )
+    if replaced:
+        summary += f", {replaced} replaced (dead token)"
+    _eprint(summary)
 
     # If we just rewrote the stored backup for the account that is the current
     # live login, a plain switch would back the (possibly stale) live
@@ -486,6 +569,6 @@ def import_accounts(
         live_slot = switcher._find_account_slot(final, identity[0], identity[1])
         if live_slot is not None and live_slot in written_slots:
             _eprint(
-                f"Note: {identity[0]} is your current live login — activate the "
+                f"Note: {identity[0]} is your current live login - activate the "
                 f"imported credentials with: cswap claude switch --to {live_slot} --force"
             )
