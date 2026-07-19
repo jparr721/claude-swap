@@ -9,30 +9,26 @@ Multi-account switcher for Claude Code and Codex. Switch between multiple Claude
 ### Using uv (recommended)
 
 ```bash
-uv tool install claude-swap
+git clone https://github.com/jparr721/claude-swap.git
+cd claude-swap
+uv tool install --force --editable "$(pwd)"
 ```
 
 ### Using pipx
 
 ```bash
-pipx install claude-swap
-```
-
-### From source
-
-```bash
 git clone https://github.com/jparr721/claude-swap.git
 cd claude-swap
-uv sync
-uv run cswap --help
+pipx install --editable "$(pwd)"
 ```
 
 ### Manual local install
 
-Install the local checkout as an editable uv tool:
+From an existing local checkout, install it as an editable uv tool:
 
 ```bash
-uv tool install --force --editable /Users/jarredparr/Projects/claude-swap
+cd /path/to/claude-swap
+uv tool install --force --editable "$(pwd)"
 ```
 
 This installs both `cswap` and `claude-swap`; the examples below use `cswap`. Editable source changes take effect without reinstalling.
@@ -41,11 +37,12 @@ This installs both `cswap` and `claude-swap`; the examples below use `cswap`. Ed
 
 `cswap upgrade` is disabled for this distribution. Update it from the source you installed from.
 
-For the editable local install:
+For an editable local install, change to its checkout first:
 
 ```bash
-git -C /Users/jarredparr/Projects/claude-swap pull
-uv tool install --force --editable /Users/jarredparr/Projects/claude-swap
+cd /path/to/claude-swap
+git pull
+uv tool install --force --editable "$(pwd)"
 ```
 
 ## Usage
