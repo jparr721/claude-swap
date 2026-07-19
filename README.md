@@ -1,8 +1,8 @@
 # claude-swap
 
-Multi-account switcher for Claude Code. Easily switch between multiple Claude accounts without logging out, or let it switch for you before you hit a rate limit. Track usage for every account at a glance, and run accounts in parallel. Works with both the Claude Code CLI and the VS Code extension.
+Multi-account switcher for Claude Code and Codex. Switch between multiple Claude accounts without logging out, let the tool switch before a rate limit, track usage at a glance, and run Claude Code accounts in parallel. It also manages and switches Codex accounts.
 
-**Command format:** `cswap <frontend> <verb>`. Backends are fixed: Claude Code uses Anthropic and Codex uses OpenAI.
+**Account command format:** `cswap <frontend> <verb>`, where `claude` manages Claude Code accounts and `codex` manages Codex accounts. Root commands are `cswap ls`, `cswap config`, `cswap purge`, and `cswap upgrade`.
 
 ## Installation
 
@@ -27,9 +27,26 @@ uv sync
 uv run cswap --help
 ```
 
+### Manual local install
+
+Install the local checkout as an editable uv tool:
+
+```bash
+uv tool install --force --editable /Users/jarredparr/Projects/claude-swap
+```
+
+This installs both `cswap` and `claude-swap`; the examples below use `cswap`. Editable source changes take effect without reinstalling.
+
 ### Updating
 
 `cswap upgrade` is disabled for this distribution. Update it from the source you installed from.
+
+For the editable local install:
+
+```bash
+git -C /Users/jarredparr/Projects/claude-swap pull
+uv tool install --force --editable /Users/jarredparr/Projects/claude-swap
+```
 
 ## Usage
 
@@ -70,9 +87,9 @@ Not sure which one? `cswap ls` is the dashboard - every account's 5-hour and 7-d
 cswap ls
 ```
 
-Or let claude-swap auto-pick by remaining quota - `cswap claude switch --strategy best` (most quota left) or `--strategy next-available` (skip rate-limited accounts).
+Or let claude-swap auto-pick by remaining quota - `cswap claude switch --strategy best` (most quota left) or `--strategy next-available` (skip rate-limited accounts). Add `--model Fable` to include that model's weekly limit in a usage-aware strategy.
 
-**Note:** You usually don't need to restart — on Linux/Windows the new account is picked up automatically, and on macOS after the Keychain cache expires. To apply it instantly, restart Claude Code or reopen the VS Code extension tab. See [Tips](#tips) for the per-platform details.
+**Note:** You usually do not need to restart - on Linux/Windows the new account is picked up automatically, and on macOS after the Keychain cache expires. To apply it instantly, restart Claude Code or reopen the VS Code extension tab. See [Tips](#tips) for the per-platform details.
 
 ### Account management
 
@@ -84,7 +101,7 @@ cswap codex list
 cswap claude switch --to 2
 ```
 
-Every account command follows `cswap <frontend> <verb>`.
+Every account command follows `cswap <frontend> <verb>`. Claude account targets can use a slot number, email, or alias where supported.
 
 Codex support is separate from Claude account switching. `cswap` adds a Codex account by driving Codex's own device-auth login, so you never have to run `codex login` by hand:
 
@@ -116,6 +133,26 @@ refreshes it in place. An account whose refresh token has been revoked shows
 
 `cswap ls` shows separate Claude and Codex account sections when they have managed accounts.
 
+### Claude account controls
+
+Use aliases to refer to a Claude account by a short name. Disabled accounts remain available as explicit switch targets, but plain rotation, automatic switching, and usage-aware strategies skip them.
+
+```bash
+cswap claude add --alias work
+cswap claude alias 2 personal
+cswap claude switch work
+cswap claude disable work
+cswap claude enable work
+cswap claude alias work --unset
+```
+
+Manage account slots without re-adding credentials:
+
+```bash
+cswap claude swap 1 2             # exchange two slots
+cswap claude move work 1          # move work to slot 1; swap if occupied
+```
+
 ### Automatic switching
 
 Let claude-swap watch your usage and switch for you. When the active account's 5-hour or 7-day window reaches the threshold (default 90%), it switches to the account with the most quota left - before you hit the limit, and safe to run while Claude Code is working:
@@ -123,6 +160,7 @@ Let claude-swap watch your usage and switch for you. When the active account's 5
 ```bash
 cswap claude auto                     # foreground loop, polls every 60s
 cswap claude auto --threshold 80      # switch earlier
+cswap claude auto --model Fable,Opus  # also watch named weekly model limits
 cswap claude auto --once              # single check-and-switch, for cron/scripts
 cswap claude auto --dry-run           # log what it would do, never switch
 ```
@@ -132,9 +170,11 @@ cswap claude auto --dry-run           # log what it would do, never switch
 
 - Runs safely alongside Claude Code: switches take the same credential locks Claude Code uses, so a swap never collides with a token refresh.
 - A cooldown (default 5 min) and a hysteresis margin stop it flip-flopping near the threshold; when every account is exhausted it sleeps until the earliest reset.
-- Usage polling is adaptive — a couple of accounts per check, busy alternates watched more closely, exhausted ones left alone until they reset — so API traffic stays flat no matter how many accounts you manage.
+- Usage polling is adaptive - a couple of accounts per check, busy alternates watched more closely, exhausted ones left alone until they reset - so API traffic stays flat no matter how many accounts you manage.
 - It fails safe: if a usage check errors it keeps trusting the last-known numbers while retries back off, and an expired token on an idle machine makes it hold rather than fail over (Claude Code refreshes the token on your next message).
 - An account whose refresh token has died is quarantined and reported until you log in with it and re-run `cswap claude add --slot N`. API-key accounts are never rotated onto unless you pass `--include-api-key-accounts`.
+- Disable an account with `cswap claude disable <account>` to hold it out of plain, automatic, and usage-aware rotation. Re-enable it with `cswap claude enable <account>`.
+- By default, switching uses account-wide 5-hour and 7-day limits. Add `--model Fable`, a comma-separated list such as `--model Fable,Opus`, or `--model all` to include scoped weekly model limits. Model names match the usage labels shown by `cswap claude list`.
 
 For cron/systemd timers, `--once` reports the outcome in its exit code (`0` switched, `1` error, `2` nothing to do, `3` blocked - no viable target), and `--json` emits one JSON event per line:
 
@@ -142,7 +182,7 @@ For cron/systemd timers, `--once` reports the outcome in its exit code (`0` swit
 */5 * * * * cswap claude auto --once --json >> ~/.cswap-auto.log 2>&1
 ```
 
-Defaults like the threshold and cooldown are configurable with `cswap config set autoswitch.threshold 80` — flags override them (see [Configuration](#configuration)).
+Defaults like the threshold and cooldown are configurable with `cswap config set autoswitch.threshold 80` - flags override them (see [Configuration](#configuration)).
 
 </details>
 
@@ -155,9 +195,25 @@ cswap claude run 2                     # launch Claude Code as account 2, here o
 cswap claude run user@example.com      # by email
 cswap claude run 2 -- --resume         # everything after '--' is forwarded to claude
 cswap claude run 2 --share-history     # share your chat history with this account too
+cswap claude run 2 --no-share           # do not share normal ~/.claude configuration
 ```
 
 Sessions use your normal `~/.claude` setup (settings, CLAUDE.md, skills, etc.), but each account keeps its own chat history. Pass `--share-history` if you want your accounts to continue the same conversations - a session started under one account shows up in `--resume` under the others, and nothing already saved is lost. Not supported on Windows yet.
+
+#### Pick an account by directory
+
+Map a directory to an account, then run Claude Code without specifying an account. The nearest mapped parent directory wins.
+
+```bash
+cswap claude map work ~/work/client-app  # map a directory to an alias
+cswap claude map                         # list mappings
+cswap claude unmap ~/work/client-app     # remove a mapping
+
+cd ~/work/client-app/src
+cswap claude run                         # launches the mapped account
+```
+
+In an unmapped directory, bare `cswap claude run` launches Claude directly using the current environment/default login.
 
 ### Refresh expired tokens
 
@@ -174,15 +230,17 @@ This will update the stored credentials without creating a duplicate.
 ```bash
 cswap ls                                  # overview across all providers
 cswap config [list|get|set|unset|path]    # settings
+cswap upgrade                             # reports that self-upgrade is disabled
 cswap purge                               # remove all claude-swap data
 
-cswap claude list|status|add|add-token|switch|remove|run|auto|export|import
+cswap claude list|status|add|add-token|switch|remove|disable|enable|alias
+cswap claude export|import|map|unmap|swap|move|run|auto
 cswap codex list|status|add|switch|remove
 ```
 
 ## Tips
 
-- **Do you need to restart after switching?** Usually not. On **Linux and Windows**, credentials are stored in a file and Claude Code re-reads them whenever that file changes, so the new account takes effect on your next message — no restart needed. On **macOS**, credentials live in the Keychain, which Claude Code caches for about 30 seconds; a running session picks up the switch once that cache expires. Restart Claude Code (or close and reopen the VS Code extension tab) only if you want the change to apply instantly.
+- **Do you need to restart after switching?** Usually not. On **Linux and Windows**, credentials are stored in a file and Claude Code re-reads them whenever that file changes, so the new account takes effect on your next message - no restart needed. On **macOS**, credentials live in the Keychain, which Claude Code caches for about 30 seconds; a running session picks up the switch once that cache expires. Restart Claude Code (or close and reopen the VS Code extension tab) only if you want the change to apply instantly.
 - **Continuing sessions after switching:** You can keep using the same Claude Code session after switching - run `cswap claude switch` in any terminal and carry on. If you'd prefer a clean start, close and reopen Claude Code (or the VS Code extension tab) and use `--resume` to pick your previous session. Either way, the first message on the new account may use extra usage as its conversation cache rebuilds.
 
 ## How it works
@@ -192,6 +250,7 @@ cswap codex list|status|add|switch|remove
 - Account credentials stored securely using platform-appropriate methods
 - Switches (manual and automatic) hold Claude Code's own credential locks while writing, so a swap never interleaves with a token refresh
 - Auto-switch freshens a target's token before activating it, and quarantines accounts whose refresh token has died (recover with `cswap claude add --slot N`)
+- Codex switching repoints only the active `auth.json`; its stored account credentials remain separate
 
 ## Data locations
 
@@ -201,7 +260,7 @@ cswap codex list|status|add|switch|remove
 | macOS | macOS Keychain | `~/.claude-swap-backup/` |
 | Linux / WSL | File-based (inside the backup directory, under `credentials/`) | `${XDG_DATA_HOME:-~/.local/share}/claude-swap/` |
 
-Session-mode profiles (`cswap claude run`) live under the backup directory in `sessions/`. Tool preferences (`settings.json`) and auto-switch state (`autoswitch_state.json` - cooldown and quarantined accounts; delete it to reset) live in the backup directory root.
+Session-mode profiles (`cswap claude run`) live under the backup directory in `sessions/`. Tool preferences (`settings.json`), auto-switch state (`autoswitch_state.json` - cooldown and quarantined accounts; delete it to reset), and directory mappings (`mappings.json`) live in the backup directory root. Managed Codex accounts live under `providers/codex/openai/` in that root.
 
 On Linux/WSL, set `XDG_DATA_HOME` to override the default location.
 
@@ -218,11 +277,12 @@ Tool preferences live in `settings.json` in the backup root; `cswap config` read
 cswap config                              # list effective settings ("(default)" = not set)
 cswap config get autoswitch.threshold
 cswap config set autoswitch.threshold 80  # validated: rejects out-of-range values loudly
+cswap config set autoswitch.model Fable,Opus
 cswap config unset autoswitch.threshold   # back to the default
 cswap config path                         # where settings.json lives
 ```
 
-`cswap config list` shows every key with its current value ("(default)" marks ones you haven't set); setting an invalid key or an out-of-range value fails loudly, naming the allowed range. Hand-editing the file still works - `cswap config` is just a safer front door. `list` and `get` take `--json` for scripting.
+`cswap config list` shows every key with its current value ("(default)" marks ones you haven't set); setting an invalid key or an out-of-range value fails loudly, naming the allowed range. `autoswitch.model` accepts a model name, a comma-separated list, or `all`. Hand-editing the file still works - `cswap config` is just a safer front door. `list` and `get` take `--json` for scripting.
 
 </details>
 
@@ -292,23 +352,23 @@ cswap claude switch 2 --json
 
 `cswap ls --json` returns a schema v2 provider envelope. Each provider entry contains its existing schema v1 payload. `cswap claude status --json` and `cswap claude switch --json` still return their schema v1 payloads directly. On a handled error stdout is `{"schemaVersion":1,"error":{"type":"ConfigError","message":"invalid config"}}` with a non-zero exit code. `switch` (bare, by target, or `--to`) reports `{"switched": true|false, "from": {"number": 1}, "to": {"number": 2}, "reason": "requested"}`.
 
-Usage is served from a per-account cache: when the usage API is briefly unreachable, the last-known numbers are shown instead of nothing (the human view marks them with their age as a standalone dim line under the usage bars, e.g. `2m ago`). Rows with usage carry additive `usageFetchedAt`/`usageAgeSeconds` fields telling you how old the measurement is.
+Usage is served from a per-account cache: when the usage API is briefly unreachable, the last-known numbers are shown instead of nothing (the human view marks them with their age as a standalone dim line under the usage bars, e.g. `2m ago`). Rows with usage carry additive `usageFetchedAt`/`usageAgeSeconds` fields telling you how old the measurement is. Claude account rows add `alias` when set and `disabled: true` when held out of automatic rotation.
 
 </details>
 
-`cswap claude auto --json` emits an event *stream* instead — one JSON object per line (`{"schemaVersion":1,"event":"switch","ts":…, …}` with kinds like `poll`, `switch`, `no-switch`, `account-quarantined`, `all-exhausted`, `error`). The contract is additive: new kinds and fields may appear, so scripts should ignore unknown ones.
+`cswap claude auto --json` emits an event *stream* instead - one JSON object per line (for example, `{"schemaVersion":1,"event":"switch","ts":"2026-01-01T00:00:00Z"}`). Event kinds include `poll`, `switch`, `no-switch`, `account-quarantined`, `all-exhausted`, and `error`. The contract is additive: new kinds and fields may appear, so scripts should ignore unknown ones.
 
 ### Add an account from a raw token or API key
 
 If you only have a long-lived setup-token (e.g., produced by `claude setup-token`)
-or a managed API key (`sk-ant-api...`) and you don't want to log in via the browser
+or a managed API key beginning with `sk-ant-api` and you do not want to log in via the browser
 flow first - useful on headless servers or when receiving a token from another
 machine - register it directly. The token type is auto-detected:
 
 ```bash
-cswap claude add-token sk-ant-oat01-...             # OAuth setup-token
-cswap claude add-token sk-ant-api03-...             # managed API key
-cswap claude add-token sk-ant-oat01-... --slot 3
+cswap claude add-token <OAUTH_SETUP_TOKEN>           # OAuth setup-token
+cswap claude add-token <MANAGED_API_KEY>             # managed API key
+cswap claude add-token <OAUTH_SETUP_TOKEN> --slot 3
 cswap claude add-token - --slot 3                   # read token from stdin
 cswap claude add-token --email user@example.com     # optional label override
 ```
@@ -316,7 +376,7 @@ cswap claude add-token --email user@example.com     # optional label override
 `--email` is optional; omitted values use `setup-token-{slot}@token.local`
 (or `api-key-{slot}@token.local` for API keys). No Anthropic API calls are made.
 
-**API-key accounts.** An `sk-ant-api...` value registers a managed API-key account
+**API-key accounts.** A value beginning with `sk-ant-api` registers a managed API-key account
 (the kind Claude Code uses after `/login` with a key) rather than an OAuth
 setup-token. It switches like any other account; since API keys have no subscription
 quota, they show no usage and the usage-aware `switch` strategies never skip them as
@@ -341,7 +401,8 @@ pipx uninstall claude-swap
 ## Requirements
 
 - Python 3.12+
-- Claude Code installed and logged in
+- Claude Code installed and logged in to manage Claude accounts
+- Codex CLI installed to add or refresh Codex accounts
 
 ## License
 
