@@ -113,6 +113,7 @@ Switch between them instantly and non-destructively:
 cswap codex switch --to personal     # or: --to <number>; no argument rotates
 cswap codex list
 cswap codex status
+cswap codex reauth 1                 # runs device login and replaces Account-1 credentials
 cswap codex remove work
 cswap codex list --json
 ```
@@ -126,7 +127,8 @@ token expires, claude-swap refreshes it against the OpenAI token endpoint
 (the same grant the Codex CLI uses) and stores the rotated token in that
 account's slot. The active account is never touched - the Codex CLI owns and
 refreshes it in place. An account whose refresh token has been revoked shows
-"re-login needed"; re-add it with `cswap codex add`.
+"re-login needed"; run `cswap codex reauth <number>` to start device login for
+that managed account. Complete the device authorization in your browser.
 
 `cswap ls` shows separate Claude and Codex account sections when they have managed accounts.
 
@@ -232,7 +234,7 @@ cswap purge                               # remove all claude-swap data
 
 cswap claude list|status|add|add-token|switch|remove|disable|enable|alias
 cswap claude export|import|map|unmap|swap|move|run|auto
-cswap codex list|status|add|switch|remove
+cswap codex list|status|add|reauth|switch|remove
 ```
 
 ## Tips

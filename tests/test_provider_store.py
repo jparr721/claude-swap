@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_swap.exceptions import ConfigError
+from claude_swap.exceptions import AccountNotFoundError, ConfigError
 from claude_swap.paths import get_backup_root, get_provider_store_root
 from claude_swap.providers.frontends import CodexFrontend
 from claude_swap.providers.openai import CodexOpenAIBackend
@@ -332,6 +332,55 @@ def test_codex_add_relogin_by_identity_updates_existing_slot(
     data = store._sequence_data()
     assert set(data["accounts"].keys()) == {"2"}
     assert '"FRESH2"' in store._auth_backup_path("2").read_text(encoding="utf-8")
+
+
+def test_codex_reauth_replaces_the_requested_account_credentials(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seeded_codex_store(
+        {"1": _codex_auth("acct-1"), "2": _codex_auth("acct-2")}, active="2"
+    )
+    original_target = store._auth_backup_path("1").read_text(encoding="utf-8")
+    original_active = store._auth_backup_path("2").read_text(encoding="utf-8")
+    original_fingerprint = store._sequence_data()["accounts"]["1"]["fingerprint"]
+    fresh = {
+        "auth_mode": "chatgpt",
+        "tokens": {"account_id": "acct-1", "access_token": "FRESH"},
+    }
+    monkeypatch.setattr(
+        store,
+        "_run_headless_login",
+        lambda: _fake_codex_login(store, fresh),
+    )
+
+    store.reauthenticate_account("1")
+
+    data = store._sequence_data()
+    assert set(data["accounts"].keys()) == {"1", "2"}
+    assert data["accounts"]["1"]["label"] == "acct-label-1"
+    assert data["accounts"]["1"]["fingerprint"] != original_fingerprint
+    assert store._auth_backup_path("1").read_text(encoding="utf-8") != original_target
+    assert '"FRESH"' in store._auth_backup_path("1").read_text(encoding="utf-8")
+    assert store._auth_backup_path("2").read_text(encoding="utf-8") == original_active
+    assert store.auth_path.resolve() == store._auth_backup_path("1").resolve()
+
+
+def test_codex_reauth_rejects_an_unknown_account_before_login(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seeded_codex_store({"1": _codex_auth("acct-1")}, active="1")
+    login_started = False
+
+    def fake_login() -> None:
+        nonlocal login_started
+        login_started = True
+
+    monkeypatch.setattr(store, "_run_headless_login", fake_login)
+
+    with pytest.raises(AccountNotFoundError, match="identifier: 2"):
+        store.reauthenticate_account("2")
+
+    assert login_started is False
 
 
 def test_codex_add_clears_active_auth_before_login_to_avoid_revoke(
@@ -721,7 +770,7 @@ def test_relogin_needed_appears_in_human_output(
 
     assert result.exit_code == 0, result.output
     assert "re-login needed" in result.output
-    assert "cswap codex add" in result.output
+    assert "cswap codex reauth <number>" in result.output
 
 
 def test_materialize_active_auth_replaces_symlink_with_real_file(temp_home: Path) -> None:
