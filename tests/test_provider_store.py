@@ -11,7 +11,12 @@ from claude_swap.paths import get_backup_root, get_provider_store_root
 from claude_swap.providers.frontends import CodexFrontend
 from claude_swap.providers.openai import CodexOpenAIBackend
 from claude_swap.providers.store import ProviderAccountStore
-from claude_swap.providers.types import ProviderDefinition, ProviderRef, RefreshResult
+from claude_swap.providers.types import (
+    ProviderDefinition,
+    ProviderRef,
+    RefreshResult,
+    UsageFetchError,
+)
 
 
 def _codex_auth(account_id: str) -> dict[str, object]:
@@ -501,6 +506,110 @@ def test_inactive_expired_account_is_refreshed_and_persisted(
     assert on_disk["tokens"]["refresh_token"] == "rotated-refresh"
     rows = {row["number"]: row for row in payload["accounts"]}
     assert rows[2]["usageStatus"] == "ok"
+
+
+def test_inactive_server_rejected_token_is_refreshed_and_retried(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seeded_codex_store(
+        {"1": _codex_oauth_auth("acct-1", _FRESH), "2": _codex_oauth_auth("acct-2", _FRESH)},
+        active="1",
+    )
+    original_text = store._auth_backup_path("2").read_text(encoding="utf-8")
+    rotated = _codex_oauth_auth("acct-2", _FRESH)
+    rotated["tokens"]["refresh_token"] = "rotated-refresh"  # type: ignore[index]
+    rotated_text = json.dumps(rotated)
+    refresh_calls: list[str] = []
+    fetch_auths: list[str] = []
+
+    def fake_refresh(auth_text: str, timeout_s: float) -> RefreshResult:
+        refresh_calls.append(auth_text)
+        return RefreshResult(rotated_text, None)
+
+    def fake_fetch(
+        auth_text: str, timeout_s: float
+    ) -> dict[str, object] | UsageFetchError:
+        fetch_auths.append(auth_text)
+        if auth_text == original_text:
+            return UsageFetchError("token expired", None, 401)
+        if auth_text == rotated_text:
+            return {"windows": [{"label": "5h", "pct": 10.0}]}
+        return {"windows": []}
+
+    monkeypatch.setattr(store.definition.backend, "refresh_auth", fake_refresh)
+    monkeypatch.setattr(store.definition.backend, "fetch_usage", fake_fetch)
+
+    payload = store.list_accounts()
+
+    assert refresh_calls == [original_text]
+    assert fetch_auths.count(original_text) == 1
+    assert fetch_auths.count(rotated_text) == 1
+    assert store._auth_backup_path("2").read_text(encoding="utf-8") == rotated_text
+    rows = {row["number"]: row for row in payload["accounts"]}
+    assert rows[2]["usageStatus"] == "ok"
+
+
+def test_active_server_rejected_token_is_not_refreshed(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seeded_codex_store(
+        {"1": _codex_oauth_auth("acct-1", _FRESH), "2": _codex_oauth_auth("acct-2", _FRESH)},
+        active="1",
+    )
+    active_text = store._auth_backup_path("1").read_text(encoding="utf-8")
+    refresh_calls: list[str] = []
+
+    def fake_refresh(auth_text: str, timeout_s: float) -> RefreshResult:
+        refresh_calls.append(auth_text)
+        return RefreshResult(auth_text, None)
+
+    def fake_fetch(
+        auth_text: str, timeout_s: float
+    ) -> dict[str, object] | UsageFetchError:
+        if auth_text == active_text:
+            return UsageFetchError("token expired", None, 401)
+        return {"windows": []}
+
+    monkeypatch.setattr(store.definition.backend, "refresh_auth", fake_refresh)
+    monkeypatch.setattr(store.definition.backend, "fetch_usage", fake_fetch)
+
+    payload = store.list_accounts()
+
+    assert refresh_calls == []
+    rows = {row["number"]: row for row in payload["accounts"]}
+    assert rows[1]["usageStatus"] == "unavailable"
+    assert rows[1]["usageError"] == "token expired"
+
+
+def test_inactive_server_rejected_token_with_invalid_grant_requires_relogin(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seeded_codex_store(
+        {"1": _codex_oauth_auth("acct-1", _FRESH), "2": _codex_oauth_auth("acct-2", _FRESH)},
+        active="1",
+    )
+    rejected_text = store._auth_backup_path("2").read_text(encoding="utf-8")
+    refresh_calls: list[str] = []
+
+    def fake_refresh(auth_text: str, timeout_s: float) -> RefreshResult:
+        refresh_calls.append(auth_text)
+        return RefreshResult(None, "invalid_grant")
+
+    def fake_fetch(
+        auth_text: str, timeout_s: float
+    ) -> dict[str, object] | UsageFetchError:
+        if auth_text == rejected_text:
+            return UsageFetchError("token expired", None, 401)
+        return {"windows": []}
+
+    monkeypatch.setattr(store.definition.backend, "refresh_auth", fake_refresh)
+    monkeypatch.setattr(store.definition.backend, "fetch_usage", fake_fetch)
+
+    payload = store.list_accounts()
+
+    assert refresh_calls == [rejected_text]
+    rows = {row["number"]: row for row in payload["accounts"]}
+    assert rows[2]["usageStatus"] == "relogin_required"
 
 
 def test_active_account_is_never_refreshed_even_when_expired(

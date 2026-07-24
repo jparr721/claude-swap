@@ -154,8 +154,8 @@ def fetch_openai_usage(
     except urllib.error.HTTPError as exc:
         retry_after = _retry_after_seconds(exc)
         if exc.code in (401, 403):
-            return UsageFetchError("token expired", retry_after)
-        return UsageFetchError(f"HTTP {exc.code}", retry_after)
+            return UsageFetchError("token expired", retry_after, exc.code)
+        return UsageFetchError(f"HTTP {exc.code}", retry_after, exc.code)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         message = str(exc)
         if not message:

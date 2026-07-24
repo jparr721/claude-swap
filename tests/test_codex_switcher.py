@@ -112,7 +112,20 @@ def test_fetch_codex_usage_429_carries_retry_after(
 
     result = fetch_codex_usage(json.dumps(_codex_auth("acct-1")), timeout_s=3.0)
 
-    assert result == _UsageFetchError("HTTP 429", 300.0)
+    assert result == _UsageFetchError("HTTP 429", 300.0, 429)
+
+
+def test_fetch_codex_usage_401_carries_auth_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_urlopen(request, timeout):
+        raise _http_error(401, None)
+
+    monkeypatch.setattr("claude_swap.providers.openai.urllib.request.urlopen", fake_urlopen)
+
+    result = fetch_codex_usage(json.dumps(_codex_auth("acct-1")), timeout_s=3.0)
+
+    assert result == _UsageFetchError("token expired", None, 401)
 
 
 def test_codex_wrapper_uses_provider_store_and_compat_usage_hook(
