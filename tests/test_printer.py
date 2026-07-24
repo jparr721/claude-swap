@@ -30,15 +30,19 @@ def test_helpers_emit_ansi_when_forced() -> None:
     # Monkeypatching printer.console's cached _color_system to trigger
     # re-detection proved unstable across rich versions (setting it to
     # None short-circuits color_system to None rather than re-detecting).
-    # Instead, construct a Console the same way with force_terminal=True
-    # at construction time (the supported way to force color) and verify
-    # the same style machinery emits escape codes there.
-    forced_console = Console(theme=printer.THEME, force_terminal=True)
+    # Instead, construct a Console with an explicit color system. `NO_COLOR`
+    # is set in this test environment, so force_terminal alone is insufficient.
+    forced_console = Console(
+        theme=printer.THEME,
+        force_terminal=True,
+        color_system="standard",
+        no_color=False,
+    )
     with forced_console.capture() as capture:
         forced_console.print(Text("hello", style="accent"), end="", soft_wrap=True)
     styled = capture.get()
     assert "hello" in styled
-    assert styled != "hello"  # carries escape codes
+    assert "\x1b[" in styled
 
 
 def test_helpers_never_wrap_long_text() -> None:

@@ -21,6 +21,7 @@ class AuthMetadata:
 class UsageFetchError:
     message: str
     retry_after_s: float | None
+    status_code: int
 
 
 @dataclass(frozen=True)

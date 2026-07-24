@@ -465,15 +465,34 @@ class ProviderAccountStore:
             auth_text = self._read_account_auth(account_num)
         except ConfigError as exc:
             return FetchRecord(error=str(exc))
-        if account_num != active_num:
-            refreshed = self._maybe_refresh_inactive_auth(account_num, auth_text)
+        backend = self.definition.backend
+        inactive_account = account_num != active_num
+        refresh_attempted_before_fetch = False
+        if inactive_account and backend.access_token_expired(auth_text):
+            refresh_attempted_before_fetch = True
+            refreshed = self._refresh_inactive_auth(account_num, auth_text)
             if isinstance(refreshed, FetchRecord):
                 return refreshed
-            auth_text = refreshed
+            if refreshed is not None:
+                auth_text = refreshed
         try:
-            usage = self.definition.backend.fetch_usage(auth_text, OPENAI_USAGE_TIMEOUT_S)
+            usage = backend.fetch_usage(auth_text, OPENAI_USAGE_TIMEOUT_S)
         except ConfigError as exc:
             return FetchRecord(error=str(exc))
+        if (
+            inactive_account
+            and not refresh_attempted_before_fetch
+            and isinstance(usage, UsageFetchError)
+            and usage.status_code == 401
+        ):
+            refreshed = self._refresh_inactive_auth(account_num, auth_text)
+            if isinstance(refreshed, FetchRecord):
+                return refreshed
+            if refreshed is not None:
+                try:
+                    usage = backend.fetch_usage(refreshed, OPENAI_USAGE_TIMEOUT_S)
+                except ConfigError as exc:
+                    return FetchRecord(error=str(exc))
         if isinstance(usage, dict):
             usage_dict = usage
             windows = usage_dict.get("windows")
@@ -499,26 +518,22 @@ class ProviderAccountStore:
             return FetchRecord(error=usage.message, retry_after_s=usage.retry_after_s)
         return FetchRecord(error=usage or "usage unavailable")
 
-    def _maybe_refresh_inactive_auth(
+    def _refresh_inactive_auth(
         self, account_num: str, auth_text: str
-    ) -> str | FetchRecord:
-        """Refresh an inactive account's expired access token and persist it.
+    ) -> str | FetchRecord | None:
+        """Refresh an inactive account's access token and persist it.
 
         The active account is never handled here: the frontend (codex) owns
         and rotates its file in place, and refreshing it would double-spend
-        the single-use refresh token. Refresh cadence is usage-driven - this
-        runs only when the account's usage entry has gone stale, not the
-        moment its token expires.
+        the single-use refresh token.
 
-        Returns the auth text to fetch usage with, or a FetchRecord whose
-        error must be recorded instead of fetching.
+        Returns rotated auth text, an error record, or None when the account
+        has no refresh token.
         """
         backend = self.definition.backend
-        if not backend.access_token_expired(auth_text):
-            return auth_text
         outcome = backend.refresh_auth(auth_text, OPENAI_USAGE_TIMEOUT_S)
         if outcome.error == "no_refresh_token":
-            return auth_text
+            return None
         if outcome.error == "invalid_grant":
             return FetchRecord(error="invalid_grant")
         if outcome.error is not None or outcome.auth_text is None:
