@@ -551,6 +551,9 @@ class _StubProviderStore:
     def add_account(self, label: str | None, slot: int | None) -> None:
         self.calls.append(("add_account", {"label": label, "slot": slot}))
 
+    def reauthenticate_account(self, identifier: str) -> None:
+        self.calls.append(("reauthenticate_account", {"identifier": identifier}))
+
     def switch(self, identifier: str | None, json_output: bool) -> dict | None:
         self.calls.append(("switch", {"identifier": identifier, "json_output": json_output}))
         return None
@@ -620,6 +623,17 @@ def test_codex_add_with_label_and_slot(stub_provider: dict[str, object]) -> None
     )
     assert result.exit_code == 0
     assert stub_provider["store"].calls == [("add_account", {"label": "work", "slot": 2})]
+
+
+def test_codex_reauth_routes_to_the_requested_account(
+    stub_provider: dict[str, object],
+) -> None:
+    result = runner.invoke(app, ["codex", "reauth", "1"])
+
+    assert result.exit_code == 0
+    assert stub_provider["store"].calls == [
+        ("reauthenticate_account", {"identifier": "1"})
+    ]
 
 
 def test_codex_switch_positional_and_to_flag(stub_provider: dict[str, object]) -> None:

@@ -123,6 +123,8 @@ def _render_claude_accounts(switcher: ClaudeAccountSwitcher, token_status: bool)
 
 def _provider_relogin_hint(provider_store: ProviderAccountStore) -> str:
     ref = provider_store.definition.ref
+    if ref.frontend == "codex" and ref.backend == "openai":
+        return "re-login needed - reauthenticate with: cswap codex reauth <number>"
     return f"re-login needed - re-add with: cswap {ref.frontend} add"
 
 
@@ -1035,6 +1037,18 @@ def codex_add(
     """Add or refresh a Codex account via device login."""
     _dispatch(
         lambda: _codex_store().add_account(label=label, slot=slot),
+        json_mode=False,
+        update_check=False,
+    )
+
+
+@codex_app.command("reauth")
+def codex_reauth(
+    identifier: str = typer.Argument(..., metavar="NUM|LABEL"),
+) -> None:
+    """Reauthenticate an existing Codex account via device login."""
+    _dispatch(
+        lambda: _codex_store().reauthenticate_account(identifier),
         json_mode=False,
         update_check=False,
     )

@@ -750,6 +750,17 @@ class ProviderAccountStore:
     def add_account(self, label: str | None, slot: int | None) -> None:
         self._add_account_via_login(label, slot)
 
+    def reauthenticate_account(self, identifier: str) -> None:
+        self._setup_directories()
+        with FileLock(self.lock_file):
+            data = self._sequence_data()
+            account_num = self._resolve_account_identifier(data, identifier)
+            if account_num is None:
+                raise AccountNotFoundError(
+                    f"No {self.definition.display_name} account found with identifier: {identifier}"
+                )
+        self._add_account_via_login(label=None, slot=int(account_num))
+
     def list_data(self, on_fetch: FetchProgress | None = None) -> list[ProviderAccountRow]:
         """Display-grade account rows for the CLI's human renderer."""
         data = self._sequence_data()
